@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=ted
+GenericName=Text Editor
+Comment=Fast, extensible text editor
+Exec=@BINDIR@/ted %F
+Icon=ted
+Terminal=false
+Categories=Development;TextEditor;
+MimeType=text/plain;text/markdown;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/rust;text/x-python;text/x-shellscript;text/x-makefile;application/json;application/toml;application/x-yaml;
+Keywords=text;editor;code;
+StartupNotify=true
+StartupWMClass=ted

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Colors come from ted's default theme (theme.rs): background, mode-line, text, cursor. -->
+  <clipPath id="tile"><rect x="16" y="16" width="224" height="224" rx="48"/></clipPath>
+  <g clip-path="url(#tile)">
+    <rect x="16" y="16" width="224" height="224" fill="#2e3436"/>
+    <rect x="16" y="196" width="224" height="44" fill="#204a87"/>
+  </g>
+  <path d="M100 58 V136 Q100 162 128 162 H140 M72 92 H138" fill="none" stroke="#eeeeec" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="158" y="98" width="34" height="66" fill="#f57900"/>
+</svg>

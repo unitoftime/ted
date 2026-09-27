@@ -1,0 +1,17 @@
+[package]
+name = "ted_gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ted"
+path = "src/main.rs"
+
+[dependencies]
+ted_core = { path = "../ted_core" }
+ted_git = { path = "../ted_git" }
+ted_term = { path = "../ted_term" }
+ted_lsp = { path = "../ted_lsp" }
+winit = "0.29"
+softbuffer = "0.4"
+cosmic-text = "0.12"

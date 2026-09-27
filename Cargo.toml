@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/ted_core",
+    "crates/ted_git",
+    "crates/ted_term",
+    "crates/ted_lsp",
+    "crates/ted_gui",
+]
+resolver = "2"

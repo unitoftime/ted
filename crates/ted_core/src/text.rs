@@ -1,0 +1,158 @@
+//! Small text primitives shared by buffers and single-line inputs.
+
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+
+/// Chars to move backward over: trailing non-word chars, then the word itself.
+/// `chars_rev` yields characters walking backward from the cursor.
+pub fn word_len_backward(chars_rev: impl Iterator<Item = char>) -> usize {
+    let mut chars = chars_rev.peekable();
+    let mut n = 0;
+    while chars.next_if(|c| !c.is_alphanumeric()).is_some() {
+        n += 1;
+    }
+    while chars.next_if(|c| c.is_alphanumeric()).is_some() {
+        n += 1;
+    }
+    n
+}
+
+/// Chars to move forward over: leading non-word chars, then the word itself.
+pub fn word_len_forward(chars: impl Iterator<Item = char>) -> usize {
+    word_len_backward(chars)
+}
+
+pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
+    let p = path.as_ref();
+    if let Ok(stripped) = p.strip_prefix("~") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return Path::new(&home).join(stripped);
+        }
+    }
+    p.to_path_buf()
+}
+
+/// Displays `path` with the home directory shortened to `~`, preserving a trailing slash.
+pub fn collapse_tilde<P: AsRef<Path>>(path: P) -> String {
+    let p = path.as_ref();
+    let path_str = p.to_string_lossy();
+    let ends_with_slash = path_str.ends_with('/');
+
+    if let Some(home_os) = std::env::var_os("HOME") {
+        let home = Path::new(&home_os);
+        let canon_home = home.canonicalize().ok();
+        for base in std::iter::once(home).chain(canon_home.as_deref()) {
+            if let Ok(stripped) = p.strip_prefix(base) {
+                let stripped = stripped.to_string_lossy();
+                let mut res = if stripped.is_empty() { "~".to_string() } else { format!("~/{}", stripped) };
+                if ends_with_slash && !res.ends_with('/') {
+                    res.push('/');
+                }
+                return res;
+            }
+        }
+    }
+    path_str.to_string()
+}
+
+/// Expands `~`, resolves against the working directory and canonicalizes when possible.
+pub fn absolutize<P: AsRef<Path>>(path: P) -> PathBuf {
+    let expanded = expand_tilde(path);
+    let full = if expanded.is_absolute() {
+        expanded
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(expanded),
+            Err(_) => expanded,
+        }
+    };
+    full.canonicalize().unwrap_or(full)
+}
+
+/// The directory a buffer visiting `path` works in: `path` itself if it is a directory,
+/// else its parent; the working directory for buffers without a file.
+pub fn directory_of(path: Option<&Path>) -> PathBuf {
+    match path.map(absolutize) {
+        Some(path) if path.is_dir() => path,
+        Some(path) => path.parent().map(Path::to_path_buf).unwrap_or(path),
+        None => absolutize("."),
+    }
+}
+
+/// Truncates `text` to at most `max` chars, ending with an ellipsis when cut.
+pub fn truncate_with_ellipsis(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Labels for `paths` as short as they can be while telling them apart: each is its file
+/// name, grown by directories from the right while another path shares it (`view/mod.rs`,
+/// `ui/mod.rs`). Repeats of a path get the same label; a path that needs all of itself is
+/// shown whole, `~`-relative.
+pub fn short_paths(paths: &[&Path]) -> Vec<String> {
+    let mut unique = paths.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let parts: Vec<Vec<&OsStr>> = unique.iter().map(|p| p.iter().collect()).collect();
+    let suffix = |i: usize, depth: usize| &parts[i][parts[i].len().saturating_sub(depth)..];
+    let mut depth = vec![1; unique.len()];
+    loop {
+        let mut counts: HashMap<&[&OsStr], usize> = HashMap::new();
+        for (i, &d) in depth.iter().enumerate() {
+            *counts.entry(suffix(i, d)).or_default() += 1;
+        }
+        let shared: Vec<usize> =
+            (0..unique.len()).filter(|&i| counts[suffix(i, depth[i])] > 1 && depth[i] < parts[i].len()).collect();
+        if shared.is_empty() {
+            break;
+        }
+        for i in shared {
+            depth[i] += 1;
+        }
+    }
+    let labels: Vec<String> = (0..unique.len())
+        .map(|i| match depth[i] < parts[i].len() {
+            true => suffix(i, depth[i]).iter().collect::<PathBuf>().display().to_string(),
+            false => collapse_tilde(unique[i]),
+        })
+        .collect();
+    paths.iter().map(|p| labels[unique.binary_search(p).expect("`unique` holds every path")].clone()).collect()
+}
+
+/// `line` without its surrounding whitespace, and `highlights` (char ranges of `line`)
+/// moved to match, dropping what fell in the whitespace.
+pub fn trim_highlighted(line: &str, highlights: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
+    let start = line.chars().take_while(|c| c.is_whitespace()).count();
+    let text = line.trim().to_string();
+    let len = text.chars().count();
+    let moved = highlights
+        .iter()
+        .map(|r| r.start.saturating_sub(start).min(len)..r.end.saturating_sub(start).min(len))
+        .filter(|r| !r.is_empty())
+        .collect();
+    (text, moved)
+}
+
+/// `text` cut at the char ranges `highlights` (in order, not overlapping) into consecutive
+/// pieces, each with whether it is highlighted.
+pub fn highlight_runs<'a>(text: &'a str, highlights: &[Range<usize>]) -> Vec<(&'a str, bool)> {
+    let bounds: Vec<usize> = text.char_indices().map(|(b, _)| b).chain([text.len()]).collect();
+    let len = bounds.len() - 1;
+    let mut runs = Vec::with_capacity(highlights.len() * 2 + 1);
+    let mut at = 0;
+    for range in highlights {
+        let (start, end) = (range.start.clamp(at, len), range.end.min(len));
+        if start < end {
+            runs.extend([(at..start, false), (start..end, true)]);
+            at = end;
+        }
+    }
+    runs.push((at..len, false));
+    runs.into_iter().filter(|(r, _)| !r.is_empty()).map(|(r, hl)| (&text[bounds[r.start]..bounds[r.end]], hl)).collect()
+}

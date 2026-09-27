@@ -1,0 +1,7 @@
+[package]
+name = "ted_git"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ted_core = { path = "../ted_core" }
