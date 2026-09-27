@@ -154,14 +154,14 @@ pub fn echo(ed: &mut Editor) {
     }
     let id = ed.active_buffer_id();
     let buf = ed.active_buffer();
-    let (line, col) = buf.char_to_point(ed.active_view().cursor.pos);
+    let line = buf.char_to_line(ed.active_view().cursor.pos);
     let Some(store) = ed.ext::<Store>() else {
         return;
     };
     let Some((encoding, found)) = buf.path().and_then(|p| store.by_path.get(p)) else {
         return;
     };
-    let here = Position { line, col: encoding.to_units(buf.line(line).chars(), col) };
+    let here = encoding.position(buf, ed.active_view().cursor.pos);
     let on_line = || found.iter().enumerate().filter(|(_, d)| d.start.line <= line && line <= d.end.line);
     let hit = on_line().find(|(_, d)| d.start <= here && here <= d.end).or_else(|| on_line().next());
     let key = hit.map(|(i, _)| (id, line, i));
@@ -207,13 +207,7 @@ fn fill_list(ed: &mut Editor) -> BufferId {
 /// The chars a diagnostic covers; an empty range widens to one char so it shows.
 fn char_range(buf: &Buffer, d: &Diagnostic, encoding: Encoding) -> std::ops::Range<usize> {
     let len = buf.len_chars();
-    let to_char = |p: Position| {
-        if p.line >= buf.len_lines() {
-            return len;
-        }
-        buf.line_to_char(p.line) + encoding.to_chars(buf.line(p.line).chars(), p.col)
-    };
-    let (start, end) = (to_char(d.start), to_char(d.end));
+    let (start, end) = (encoding.char_of(buf, d.start), encoding.char_of(buf, d.end));
     if end > start {
         start..end
     } else if start < len {

@@ -3,7 +3,7 @@
 
 use crate::editor::Editor;
 use crate::ui::picker::PAGE_STEP;
-use crate::ui::{Choice, Menu, Picker, Prompt};
+use crate::ui::{Choice, Menu, Picker, Prompt, Tooltip};
 
 pub fn register(ed: &mut Editor) {
     let c = &mut ed.commands;
@@ -45,6 +45,13 @@ pub fn register(ed: &mut Editor) {
         };
         if let Some(menu) = ed.take_modal::<Menu>() {
             menu.choose(ed, key);
+        }
+    });
+
+    c.register_hidden("tooltip-exit-and-replay", "Close the tooltip, then handle the key", |ed, arg| {
+        if let Some(key) = arg.key() {
+            ed.take_modal::<Tooltip>();
+            ed.unread_key(key);
         }
     });
 

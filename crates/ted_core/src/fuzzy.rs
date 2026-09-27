@@ -62,6 +62,60 @@ fn score_keys(tokens: &[Token], keys: &MatchKeys) -> Option<i32> {
     Some(total)
 }
 
+/// Items narrowed down by a query as it is typed: the indices of those matching, best
+/// first.
+#[derive(Default)]
+pub struct Narrowing {
+    keys: Vec<MatchKeys>,
+    /// The query `matches` holds the matches of.
+    query: String,
+    matches: Vec<usize>,
+}
+
+impl Narrowing {
+    /// All of the items, before any query.
+    pub fn new(keys: Vec<MatchKeys>) -> Self {
+        let matches = (0..keys.len()).collect();
+        Self { keys, query: String::new(), matches }
+    }
+
+    pub fn matches(&self) -> &[usize] {
+        &self.matches
+    }
+
+    /// Adds an item; `rescan` or `show_all` then places it.
+    pub fn push(&mut self, keys: MatchKeys) {
+        self.keys.push(keys);
+    }
+
+    pub fn clear(&mut self) {
+        self.keys.clear();
+        self.matches.clear();
+    }
+
+    /// Filters for `query`, rescanning only the previous matches when the query just grew.
+    pub fn narrow(&mut self, query: &str) {
+        if !query.starts_with(&self.query) {
+            self.rescan(query);
+            return;
+        }
+        self.matches = filter_within(query, &self.keys, self.matches.iter().copied());
+        self.query = query.to_string();
+    }
+
+    /// Filters every item for `query`.
+    pub fn rescan(&mut self, query: &str) {
+        self.matches = filter(query, &self.keys);
+        self.query = query.to_string();
+    }
+
+    /// Every item, in order, whatever the query.
+    pub fn show_all(&mut self, query: &str) {
+        self.matches = (0..self.keys.len()).collect();
+        self.query = query.to_string();
+    }
+}
+
 /// Indices of the items matching `query`, best first. Ties keep the original order.
 pub fn filter(query: &str, keys: &[MatchKeys]) -> Vec<usize> {
     filter_within(query, keys, 0..keys.len())

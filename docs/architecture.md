@@ -74,8 +74,21 @@ the same way as plugins.
 Defaults hold what every user should get; personal choices belong in `init.rhai`. Defaults
 never bind `C-c <key>` in the global keymap, because that space is left to the user.
 
-## Code navigation
+## Backend chains
 
-Find-definition and find-references ask backends in priority order: language servers
-first, then a tree-sitter tags index built from each grammar's tag queries. A backend that
-declines or finds nothing hands the query on to the next.
+Features that need outside knowledge ask a chain of backends in priority order
+(`ted_core::chain`): language servers first, then a built-in fallback. A backend that
+declines or finds nothing hands the request on to the next, and answers the user has moved
+on from are dropped.
+
+- **Cross-references** (`xref`): definitions and references; the fallback is a
+  tree-sitter tags index built from each grammar's tag queries.
+- **Completion** (`completion`): candidates for the word at point, shown in a popup under
+  it; the fallback is the words of the open buffers.
+- **Formatting** (`format`): the edits that format a buffer or region, also run before
+  saving with `format_on_save`. Saving waits for `before_save` hooks like this one, with a
+  timeout.
+
+Hover and rename are language server commands. Every multi-edit change (formatting,
+rename, completion with an import) goes through `Editor::apply_edits`, one undo step per
+buffer.

@@ -14,8 +14,9 @@ otherwise assemble from packages.
   `M-x` with fuzzy completion, and keyboard-driven window splits with saved layouts
 - Tree-sitter syntax highlighting for Rust, Go, C, Python, JavaScript, TypeScript, HTML,
   CSS, JSON, TOML, YAML, Markdown, Make and shell, with syntax-aware indentation for most
-- Language servers (definitions, references, diagnostics), with a tree-sitter tags
-  fallback when no server is running
+- Language servers (definitions, references, diagnostics, completion, hover, rename and
+  formatting), with tree-sitter tags and buffer words as fallbacks when no server is
+  running
 - Built-in git porcelain: status, staging, commits, log, blame, branches and stash
 - Built-in terminal emulator
 - Compilation buffers with clickable errors and `next-error`
@@ -46,6 +47,8 @@ ted reads `~/.config/ted/init.rhai` (or `$XDG_CONFIG_HOME/ted/init.rhai`) at sta
 set("theme", "tango-dark");
 set("tab_width", 4);
 set("lsp.settings.go", #{ staticcheck: true });
+set("completion.auto", "trigger");   // "off" (default), "trigger" (after `.`), "typing"
+set("format_on_save", true);
 face("keyword", #{ fg: "#c586c0", bold: true });
 
 bind("M-o", "other-window");

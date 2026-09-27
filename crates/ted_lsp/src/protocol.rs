@@ -1,10 +1,11 @@
-//! The wire format: JSON-RPC messages framed by `Content-Length` headers, file URIs, and
-//! position columns in the encoding the server negotiated.
+//! The wire format: JSON-RPC messages framed by `Content-Length` headers, file URIs,
+//! positions with columns in the encoding the server negotiated, and text edits.
 
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use ted_core::{Buffer, Edit};
 
 /// How the server counts columns within a line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,26 @@ impl Encoding {
     pub fn to_units(self, line: impl Iterator<Item = char>, chars: usize) -> usize {
         line.take(chars).map(|c| self.units(c)).sum()
     }
+
+    /// The server's position of char `pos` of `buf`.
+    pub fn position(self, buf: &Buffer, pos: usize) -> Position {
+        let (line, col) = buf.char_to_point(pos);
+        Position { line, col: self.to_units(buf.line(line).chars(), col) }
+    }
+
+    /// The char of `buf` at the server's position `p`, clamped to the text.
+    pub fn char_of(self, buf: &Buffer, p: Position) -> usize {
+        if p.line >= buf.len_lines() {
+            return buf.len_chars();
+        }
+        buf.line_to_char(p.line) + self.to_chars(buf.line(p.line).chars(), p.col)
+    }
+
+    /// The chars of `buf` a JSON `Range` covers.
+    pub fn chars_of(self, buf: &Buffer, range: &Value) -> Option<std::ops::Range<usize>> {
+        let (start, end) = range_from_json(range)?;
+        Some(self.char_of(buf, start)..self.char_of(buf, end))
+    }
 }
 
 /// A position as the server counts it: 0-based line and column.
@@ -66,6 +87,17 @@ impl Position {
 /// A `(start, end)` range from a JSON `Range`.
 pub fn range_from_json(v: &Value) -> Option<(Position, Position)> {
     Some((Position::from_json(v.get("start")?)?, Position::from_json(v.get("end")?)?))
+}
+
+/// The params of a request about the position of char `pos` in document `uri`.
+pub fn text_document_position(uri: &str, buf: &Buffer, pos: usize, encoding: Encoding) -> Value {
+    json!({ "textDocument": { "uri": uri }, "position": encoding.position(buf, pos).to_json() })
+}
+
+/// Reads `TextEdit[]` (or null) as edits of `buf`.
+pub fn edits_from_json(v: &Value, buf: &Buffer, encoding: Encoding) -> Vec<Edit> {
+    let one = |e: &Value| Some(Edit::new(encoding.chars_of(buf, e.get("range")?)?, e.get("newText")?.as_str()?));
+    v.as_array().map_or_else(Vec::new, |edits| edits.iter().filter_map(one).collect())
 }
 
 /// A location in a file, as the server reported it.

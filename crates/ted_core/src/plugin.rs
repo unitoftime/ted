@@ -41,11 +41,15 @@
 //!   their content, `rows::RowText` when lines stand for items (point and marks then stay
 //!   on their items across refreshes); `buffer.enable_keymap` layers a minor keymap on one
 //!   buffer.
-//! - `ed.hooks` subscribes to buffer and command events.
+//! - `ed.hooks` subscribes to buffer and command events; `before_save` hooks can change a
+//!   buffer before it is written (formatting) and hold the save until they are done.
 //! - `ed.ext_mut::<T>()` / `ed.set_ext(..)` / `buffer.local_mut::<T>()` store plugin state
 //!   per editor or buffer; `ed.set_chain` / `ed.last_chain` pass state to the next command.
-//! - `ed.prompt / confirm / pick / push_modal` and `ui::Menu` for UI; `ed.spawn` for
-//!   background work.
+//! - `ed.prompt / confirm / pick / push_modal` and `ui::Menu` / `ui::Tooltip` for UI;
+//!   `ed.spawn` for background work, `ed.after` to run something later.
+//! - `chain::register(ed, priority, backend)` answers definitions and references,
+//!   completions or formatting for the buffers a plugin knows about (a language server).
+//! - `ed.apply_edits` changes a buffer in many places as one undo step.
 
 use std::rc::Rc;
 
@@ -59,11 +63,29 @@ pub trait Plugin: 'static {
 
 pub type BufferHook = Rc<dyn Fn(&mut Editor, BufferId)>;
 pub type EditorHook = Rc<dyn Fn(&mut Editor)>;
+/// Runs before a buffer is written, and may change it first. The save waits until the
+/// hook calls `done` on the token, now or later (from a job's reply), but only so long:
+/// a hook that takes too long is skipped.
+pub type SaveHook = Rc<dyn Fn(&mut Editor, BufferId, SaveToken)>;
+
+/// Lets a save held by a `before_save` hook go on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "the save waits until its token is done"]
+pub struct SaveToken(pub(crate) u64);
+
+impl SaveToken {
+    /// The hook is finished with the buffer. Late or repeated calls are ignored.
+    pub fn done(self, ed: &mut Editor) {
+        ed.continue_save(self);
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct Hooks {
     /// A buffer was created from a file or directory.
     pub buffer_opened: Vec<BufferHook>,
+    /// In order, before a buffer is written by `Editor::save_buffer`.
+    pub before_save: Vec<SaveHook>,
     pub buffer_saved: Vec<BufferHook>,
     /// Runs before the buffer is removed.
     pub buffer_killed: Vec<BufferHook>,

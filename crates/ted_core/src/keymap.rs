@@ -39,6 +39,8 @@ const BUILTIN: &[(&str, Option<KeymapId>, bool)] = &[
     ("undo-tree", None, true),
     ("jump", None, true),
     ("special", None, false),
+    ("completion", None, true),
+    ("tooltip", None, true),
 ];
 
 impl KeymapId {
@@ -55,6 +57,10 @@ impl KeymapId {
     /// Keys shared by generated read-only buffers (`Mode::special`): help, quit, refresh
     /// and row motion.
     pub const SPECIAL: KeymapId = KeymapId(9);
+    /// The completion popup: selects and accepts candidates while typing goes on in the
+    /// buffer.
+    pub const COMPLETION: KeymapId = KeymapId(10);
+    pub const TOOLTIP: KeymapId = KeymapId(11);
 }
 
 #[derive(Clone)]

@@ -113,7 +113,7 @@ fn test_find_file_double_tab_does_not_leak_tabs_to_buffer() {
     // Third tab cycles the selection
     editor.handle_key(tab);
     let picker = editor.modal::<Picker>().unwrap();
-    if picker.filtered.len() > 1 {
+    if picker.filtered().len() > 1 {
         assert_eq!(picker.selected, 1);
     }
     assert_eq!(editor.active_buffer().to_string(), "");

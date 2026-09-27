@@ -11,17 +11,22 @@
 //! - Settings are named, typed and documented, like commands and faces.
 //! - Buffers carry decorations (styled ranges that track edits) and typed local state.
 //! - Slow work runs as background jobs that send closures back to the UI thread.
+//! - Definitions, completion and formatting ask chains of backends (`chain`): language
+//!   servers first, built-in fallbacks after.
 //! - Plugins extend all of the above through `Editor`; users rebind via `init.rhai`.
 
 pub mod brackets;
 pub mod buffer;
+pub mod chain;
 pub mod command;
 pub mod commands;
+pub mod completion;
 pub mod config;
 pub mod doc;
 pub mod editor;
 pub mod ext;
 pub mod face;
+pub mod format;
 pub mod frame;
 pub mod fuzzy;
 pub mod grep;
@@ -47,7 +52,7 @@ pub mod ui;
 pub mod view;
 pub mod xref;
 
-pub use buffer::{Buffer, BufferId, Buffers, Decoration, Margin, StyledText};
+pub use buffer::{Buffer, BufferId, Buffers, Decoration, Edit, Margin, StyledText};
 pub use command::{Arg, CommandId, Commands};
 pub use config::ConfigOp;
 pub use doc::Doc;
@@ -61,7 +66,7 @@ pub use kill_ring::KillRing;
 pub use layout::{Layout, SplitType, Tile};
 pub use locations::{Location, LocationList, Severity};
 pub use mode::{IndentStyle, Indentation, Mode, ModeOverrides, ModeRegistry};
-pub use plugin::{Hooks, Plugin};
+pub use plugin::{Hooks, Plugin, SaveToken};
 pub use project::Project;
 pub use recentf::RecentFiles;
 pub use settings::{Map, Setting, Settings, Value};

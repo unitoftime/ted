@@ -6,6 +6,11 @@
 //!
 //! - answers `find-definition` (`M-.`) and `find-references` ahead of the
 //!   tree-sitter fallback, as an xref backend (see `ted_core::xref`);
+//! - completes at point (`C-M-i`, see `ted_core::completion`) ahead of the words of open
+//!   buffers, and says which characters (`.`, `:`) open completion by itself;
+//! - formats (`format-buffer`, `format_on_save`, see `ted_core::format`);
+//! - shows the documentation of the symbol at point (`lsp-hover`, `C-c .`);
+//! - renames a symbol across the project (`lsp-rename`);
 //! - reports diagnostics, underlined in the buffer and listed by `lsp-diagnostics`
 //!   (`C-c !`).
 //!
@@ -15,8 +20,12 @@
 //! restarts the active buffer's server, picking up changed settings.
 
 mod client;
+mod completion;
 mod diagnostics;
+mod format;
+mod hover;
 mod protocol;
+mod rename;
 mod servers;
 mod transport;
 mod xref;
@@ -24,7 +33,7 @@ mod xref;
 use std::rc::Rc;
 use std::time::Duration;
 
-use ted_core::{Editor, KeymapId, Map, Plugin, Setting};
+use ted_core::{chain, Editor, KeymapId, Map, Plugin, Setting};
 
 use crate::servers::{ServerSpec, SERVERS};
 
@@ -96,6 +105,8 @@ impl Plugin for LspPlugin {
         ed.set_ext(handles);
 
         diagnostics::register(ed);
+        hover::register(ed);
+        rename::register(ed);
         ed.commands.register("lsp-restart", "Restart the language server of this buffer", |ed, _| {
             client::restart(ed);
         });
@@ -104,7 +115,9 @@ impl Plugin for LspPlugin {
         ed.hooks.buffer_killed.push(Rc::new(client::detach));
         ed.hooks.post_command.push(Rc::new(diagnostics::echo));
         ed.add_timer(SYNC_TICK, client::sync_idle);
-        ted_core::xref::register_backend(ed, 100, xref::LspBackend);
-        ed.bind_all("lsp", &[("C-c !", "lsp-diagnostics")]);
+        chain::register(ed, 100, xref::LspBackend);
+        chain::register(ed, 100, completion::LspBackend);
+        chain::register(ed, 100, format::LspBackend);
+        ed.bind_all("lsp", &[("C-c !", "lsp-diagnostics"), ("C-c .", "lsp-hover")]);
     }
 }

@@ -7,6 +7,7 @@ mod input;
 mod menu;
 pub mod picker;
 mod prompt;
+mod tooltip;
 
 use std::any::Any;
 
@@ -15,6 +16,7 @@ pub use input::LineInput;
 pub use menu::Menu;
 pub use picker::{Feed, Picker, PickerItem};
 pub use prompt::{Choice, Completion, Prompt};
+pub use tooltip::Tooltip;
 
 use crate::editor::Editor;
 use crate::face::FaceId;
@@ -133,13 +135,32 @@ pub fn render_panel(frame: &mut Frame, cx: &RenderCtx, size: (f32, f32), title: 
     if backdrop {
         frame.fill_rect(Rect::new(0.0, 0.0, frame.width, frame.height), faces.bg(FaceId::POPUP_BACKDROP));
     }
-    frame.fill_rect(rect, faces.bg(FaceId::POPUP));
-    frame.draw_rect_outline(rect, 2.0, faces.bg(FaceId::POPUP_BORDER));
-
-    let inner = Rect::new(rect.x + 2.0, rect.y + 2.0, (w - 4.0).max(0.0), (h - 4.0).max(0.0));
+    let inner = render_box(frame, cx, rect, 2.0);
     let header_h = cx.metrics.line_h + 4.0;
     frame.fill_rect(Rect::new(inner.x, inner.y, inner.w, header_h), faces.bg(FaceId::POPUP_HEADER));
     frame.draw_text_clipped(rect.x + 12.0, rect.y + 4.0, title, faces.text(FaceId::POPUP_HEADER), inner);
 
     Rect::new(inner.x, inner.y + header_h, inner.w, (inner.h - header_h).max(0.0))
+}
+
+/// Where a popup of `size` attached to `anchor` (a cell on screen) goes: just below it,
+/// or above it when there is more room there, and inside the frame.
+pub fn popup_rect(frame: &Frame, anchor: Rect, (w, h): (f32, f32)) -> Rect {
+    let below = (frame.height - anchor.y - anchor.h).max(0.0);
+    let above = anchor.y.max(0.0);
+    let (y, h) = if h <= below || below >= above {
+        (anchor.y + anchor.h, h.min(below))
+    } else {
+        (anchor.y - h.min(above), h.min(above))
+    };
+    let w = w.min(frame.width);
+    let x = anchor.x.min(frame.width - w).max(0.0);
+    Rect::new(x.floor(), y.floor(), w, h)
+}
+
+/// Fills `rect` as a popup with a `stroke` wide border and returns the area inside it.
+pub fn render_box(frame: &mut Frame, cx: &RenderCtx, rect: Rect, stroke: f32) -> Rect {
+    frame.fill_rect(rect, cx.faces.bg(FaceId::POPUP));
+    frame.draw_rect_outline(rect, stroke, cx.faces.bg(FaceId::POPUP_BORDER));
+    Rect::new(rect.x + stroke, rect.y + stroke, (rect.w - 2.0 * stroke).max(0.0), (rect.h - 2.0 * stroke).max(0.0))
 }

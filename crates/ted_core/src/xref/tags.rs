@@ -16,23 +16,25 @@ use std::thread;
 
 use tree_sitter::{Node, Parser, Tree};
 
-use super::{Backend, Item, Kind, Query, Reply};
+use super::{Item, Kind, Query};
+use crate::chain::{Backend, Reply};
 use crate::editor::Editor;
 use crate::locations::Location;
 use crate::project::Project;
 use crate::syntax::{in_comment_or_string, Grammar, Tag, TagRole};
+use crate::text::is_ident_char;
 
 /// Files larger than this are generated or data; skip them.
 const MAX_FILE_BYTES: u64 = 8 << 20;
 
 pub struct TagsBackend;
 
-impl Backend for TagsBackend {
+impl Backend<Query> for TagsBackend {
     fn name(&self) -> &str {
         "tree-sitter"
     }
 
-    fn find(&self, ed: &mut Editor, query: &Query, reply: Reply) -> bool {
+    fn start(&self, ed: &mut Editor, query: &Query, reply: Reply<Query>) -> bool {
         let buf = &mut ed.buffers[query.buffer];
         let grammar = buf.mode().grammar.and_then(|load| load()).filter(|g| g.tags.is_some());
         let (Some(grammar), Some(path)) = (grammar, buf.path().map(Path::to_path_buf)) else {
@@ -171,13 +173,12 @@ fn definitions<'a>(tags: &'a [Tag], src: &'a str, symbol: &'a str) -> impl Itera
 
 /// Start bytes of the whole-word occurrences of `symbol` outside comments and strings.
 fn references<'a>(tree: &'a Tree, src: &'a str, symbol: &'a str) -> impl Iterator<Item = usize> + 'a {
-    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     src.match_indices(symbol)
         .map(|(byte, _)| byte)
         .filter(move |&byte| {
             let before = src[..byte].chars().next_back();
             let after = src[byte + symbol.len()..].chars().next();
-            !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+            !before.is_some_and(is_ident_char) && !after.is_some_and(is_ident_char)
         })
         .filter(move |&byte| !in_comment_or_string(tree, byte))
 }

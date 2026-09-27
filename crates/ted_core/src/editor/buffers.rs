@@ -1,12 +1,32 @@
 //! Buffer lifecycle: visiting files, showing, saving and killing buffers.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
-use crate::buffer::{Buffer, BufferId};
+use crate::buffer::{map_pos, Buffer, BufferId, Edit};
 use crate::editor::Editor;
-use crate::plugin::Hooks;
+use crate::plugin::{Hooks, SaveToken};
 use crate::text::{absolutize, collapse_tilde};
+
+/// How long a save waits for `before_save` hooks (a formatter) before writing anyway.
+const SAVE_HOOK_TIMEOUT: Duration = Duration::from_secs(3);
+
+type SaveDone = Box<dyn FnOnce(&mut Editor, io::Result<()>)>;
+
+struct PendingSave {
+    buffer: BufferId,
+    next_hook: usize,
+    then: SaveDone,
+}
+
+/// Saves waiting on `before_save` hooks, by serial.
+#[derive(Default)]
+struct Saves {
+    serial: u64,
+    pending: HashMap<u64, PendingSave>,
+}
 
 impl Editor {
     pub fn add_buffer(&mut self, buffer: Buffer) -> BufferId {
@@ -89,13 +109,49 @@ impl Editor {
         }
     }
 
-    pub fn save_buffer(&mut self, id: BufferId) -> io::Result<()> {
-        self.buffers[id].save()?;
-        self.finish_save(id);
-        Ok(())
+    /// Writes `id` to its file once the `before_save` hooks are done with it, then runs
+    /// `then` with the outcome. Without hooks, or with hooks that finish at once, this all
+    /// happens before it returns.
+    pub fn save_buffer(&mut self, id: BufferId, then: impl FnOnce(&mut Editor, io::Result<()>) + 'static) {
+        let saves = self.ext_mut::<Saves>();
+        saves.serial += 1;
+        let serial = saves.serial;
+        saves.pending.insert(serial, PendingSave { buffer: id, next_hook: 0, then: Box::new(then) });
+        if !self.hooks.before_save.is_empty() {
+            self.after(SAVE_HOOK_TIMEOUT, move |ed| ed.write_pending(serial));
+        }
+        self.continue_save(SaveToken(serial));
+    }
+
+    /// Runs the next `before_save` hook of the save `token` holds, or writes the file.
+    pub(crate) fn continue_save(&mut self, token: SaveToken) {
+        let Some(save) = self.ext_mut::<Saves>().pending.get_mut(&token.0) else {
+            return;
+        };
+        let (buffer, index) = (save.buffer, save.next_hook);
+        save.next_hook += 1;
+        match self.hooks.before_save.get(index).cloned() {
+            Some(hook) if self.buffers.contains(buffer) => hook(self, buffer, token),
+            _ => self.write_pending(token.0),
+        }
+    }
+
+    fn write_pending(&mut self, serial: u64) {
+        let Some(save) = self.ext_mut::<Saves>().pending.remove(&serial) else {
+            return;
+        };
+        let result = match self.buffers.get_mut(save.buffer) {
+            Some(buf) => buf.save(),
+            None => Err(io::Error::new(io::ErrorKind::NotFound, "the buffer was killed")),
+        };
+        if result.is_ok() {
+            self.finish_save(save.buffer);
+        }
+        (save.then)(self, result);
     }
 
     /// Writes `id` to `path`, which it visits from then on (picking up that path's mode).
+    /// Unlike `save_buffer`, this runs no `before_save` hooks.
     pub fn save_buffer_as(&mut self, id: BufferId, path: &Path) -> io::Result<()> {
         self.buffers[id].save_as(path)?;
         let mode = self.modes.for_path(Some(path));
@@ -110,6 +166,21 @@ impl Editor {
             self.set_status(msg);
         }
         self.run_buffer_hooks(|h| &h.buffer_saved, id);
+    }
+
+    /// Applies `edits` to buffer `id` as one undo step (see `Buffer::apply_edits`), moving
+    /// the cursor and mark of every window showing it along with the text.
+    pub fn apply_edits(&mut self, id: BufferId, mut edits: Vec<Edit>) -> Result<(), String> {
+        let active = self.layout.active();
+        let cursor = if active.buffer == id { active.cursor.pos } else { 0 };
+        self.buffers[id].apply_edits(&mut edits, cursor)?;
+        for view in self.layout.views_showing(id) {
+            let cursor = &mut view.cursor;
+            cursor.pos = map_pos(&edits, cursor.pos);
+            cursor.mark = cursor.mark.map(|mark| map_pos(&edits, mark));
+            cursor.goal_col = None;
+        }
+        Ok(())
     }
 
     /// Kills `id` (without asking), showing another buffer wherever it was displayed.

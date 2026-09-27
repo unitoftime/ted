@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::editor::Editor;
 use crate::face::{Face, FaceId};
 use crate::frame::{CursorVisual, Frame, Rect};
-use crate::fuzzy::{self, MatchKeys};
+use crate::fuzzy::{MatchKeys, Narrowing};
 use crate::jobs::{JobContext, JobHandle};
 use crate::keymap::KeymapId;
 use crate::locations::Location;
@@ -119,13 +119,10 @@ pub struct Picker {
     pub title: String,
     pub input: LineInput,
     pub items: Vec<PickerItem>,
-    keys: Vec<MatchKeys>,
     /// What each item stands for (a `Vec<T>` parallel to `items`), handed to `on_select`.
     values: Box<dyn Any>,
-    /// Indices into `items` matching the query, best first.
-    pub filtered: Vec<usize>,
-    /// The query `filtered` holds the matches of.
-    filtered_query: String,
+    /// The items matching the query.
+    matches: Narrowing,
     pub selected: usize,
     keymap: KeymapId,
     on_select: Option<SelectFn>,
@@ -158,7 +155,7 @@ impl Picker {
         on_select: impl FnOnce(&mut Editor, T) + 'static,
     ) -> Self {
         let (items, values): (Vec<PickerItem>, Vec<T>) = entries.into_iter().unzip();
-        let keys = items.iter().map(PickerItem::match_keys).collect();
+        let matches = Narrowing::new(items.iter().map(PickerItem::match_keys).collect());
         let on_select: SelectFn = Box::new(move |ed, values, index| {
             let mut values = values.downcast::<Vec<T>>().expect("values have the picker's type");
             on_select(ed, values.swap_remove(index));
@@ -168,10 +165,8 @@ impl Picker {
             title: title.into(),
             input: LineInput::default(),
             items,
-            keys,
             values: Box::new(values),
-            filtered: Vec::new(),
-            filtered_query: String::new(),
+            matches,
             selected: 0,
             keymap: KeymapId::PICKER,
             on_select: Some(on_select),
@@ -229,9 +224,8 @@ impl Picker {
         }
         (live.clear_values)(&mut *self.values);
         self.items.clear();
-        self.keys.clear();
+        self.matches.clear();
         self.labels.clear();
-        self.filtered.clear();
         self.selected = 0;
         let query = self.input.text();
         if !query.is_empty() {
@@ -275,14 +269,14 @@ impl Picker {
             return false;
         };
         for (item, value) in entries {
-            self.keys.push(item.match_keys());
+            self.matches.push(item.match_keys());
             self.items.push(item);
             values.push(value);
         }
         self.relabel();
-        let selected = self.filtered.get(self.selected).copied();
+        let selected = self.filtered().get(self.selected).copied();
         self.rescan();
-        self.selected = selected.and_then(|s| self.filtered.iter().position(|&i| i == s)).unwrap_or(0);
+        self.selected = selected.and_then(|s| self.filtered().iter().position(|&i| i == s)).unwrap_or(0);
         true
     }
 
@@ -305,40 +299,37 @@ impl Picker {
             .collect();
     }
 
-    /// Filters for the current query, rescanning only the previous matches when the query
-    /// just grew.
+    /// Filters for the current query.
     fn refilter(&mut self) {
-        let query = self.input.text();
-        if !query.starts_with(&self.filtered_query) {
-            self.rescan();
-            return;
-        }
-        self.filtered = fuzzy::filter_within(query, &self.keys, self.filtered.iter().copied());
-        self.filtered_query = query.to_string();
-        if self.selected >= self.filtered.len() {
+        self.matches.narrow(self.input.text());
+        if self.selected >= self.filtered().len() {
             self.selected = 0;
         }
     }
 
     /// Filters every item for the current query (a live picker lists them all).
     fn rescan(&mut self) {
-        self.filtered = match self.live {
-            Some(_) => (0..self.items.len()).collect(),
-            None => fuzzy::filter(self.input.text(), &self.keys),
-        };
-        self.filtered_query = self.input.text().to_string();
-        if self.selected >= self.filtered.len() {
+        match self.live {
+            Some(_) => self.matches.show_all(self.input.text()),
+            None => self.matches.rescan(self.input.text()),
+        }
+        if self.selected >= self.filtered().len() {
             self.selected = 0;
         }
     }
 
+    /// Indices into `items` matching the query, best first.
+    pub fn filtered(&self) -> &[usize] {
+        self.matches.matches()
+    }
+
     pub fn selected_item(&self) -> Option<&PickerItem> {
-        self.filtered.get(self.selected).map(|&i| &self.items[i])
+        self.filtered().get(self.selected).map(|&i| &self.items[i])
     }
 
     /// Moves the selection by `delta`, wrapping when `wrap` is set, clamping otherwise.
     pub fn move_selection(&mut self, delta: isize, wrap: bool) {
-        let n = self.filtered.len();
+        let n = self.filtered().len();
         if n == 0 {
             return;
         }
@@ -351,7 +342,7 @@ impl Picker {
 
     /// Consumes the picker and runs its callback with the selected item, if any.
     pub fn select(mut self, ed: &mut Editor) {
-        let Some(&index) = self.filtered.get(self.selected) else {
+        let Some(&index) = self.filtered().get(self.selected) else {
             return;
         };
         if let Some(f) = self.on_select.take() {
@@ -369,7 +360,7 @@ impl Picker {
             (Some(_), None) => ", loading…",
             (None, _) => "",
         };
-        let title = format!("{} ({} items{})", self.title, self.filtered.len(), loading);
+        let title = format!("{} ({} items{})", self.title, self.filtered().len(), loading);
         let body = render_panel(frame, cx, (w, h), &title, false);
         let left = body.x + 10.0;
 
@@ -392,7 +383,7 @@ impl Picker {
         let max_chars = (((body.w - 20.0) / m.char_w.max(1.0)).floor() as usize).max(10);
         let title_width = (((body.w - 36.0) / (m.char_w.max(1.0) * 2.0)).floor() as usize).clamp(20, 45);
 
-        for (row, &item_idx) in self.filtered.iter().skip(scroll).take(visible_rows).enumerate() {
+        for (row, &item_idx) in self.filtered().iter().skip(scroll).take(visible_rows).enumerate() {
             let item = &self.items[item_idx];
             let is_selected = scroll + row == self.selected;
             let row_y = list_y + row as f32 * m.line_h;

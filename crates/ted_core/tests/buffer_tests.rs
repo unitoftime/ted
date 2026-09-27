@@ -92,7 +92,7 @@ fn test_scratch_buffer_switcher_and_keybindings() {
     editor.execute("switch-to-buffer");
     let picker = editor.modal::<Picker>().expect("switcher picker");
     assert_eq!(picker.id(), "switch-to-buffer");
-    let top = &picker.items[picker.filtered[0]];
+    let top = &picker.items[picker.filtered()[0]];
     assert_eq!(top.title, "*scratch*");
     assert_eq!(top.subtitle, "scratch buffer");
 
@@ -104,7 +104,7 @@ fn test_scratch_buffer_switcher_and_keybindings() {
     // And back to test.txt
     editor.execute("switch-to-buffer");
     let picker = editor.modal::<Picker>().unwrap();
-    assert_eq!(picker.items[picker.filtered[0]].title, "test.txt");
+    assert_eq!(picker.items[picker.filtered()[0]].title, "test.txt");
     editor.handle_key(KeyEvent::plain(KeyCode::Enter));
     assert_eq!(editor.active_buffer().path(), Some(f1.as_path()));
 

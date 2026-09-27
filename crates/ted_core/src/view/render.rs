@@ -39,6 +39,7 @@ impl Doc<'_> {
         let m = cx.metrics;
         self.view.bounds = bounds;
         self.view.metrics = m;
+        self.view.caret = None;
         if bounds.is_empty() || m.line_h <= 0.0 || m.char_w <= 0.0 {
             return;
         }
@@ -212,6 +213,7 @@ impl Doc<'_> {
 
         if let Some((x, y)) = cursor_at {
             if x >= text_x && x < bounds.x + bounds.w {
+                self.view.caret = Some(Rect::new(x, y, m.char_w, m.line_h));
                 let rect = Rect::new(x, y, cx.cursor_w, m.line_h);
                 let color = faces.bg(FaceId::CURSOR);
                 if focused {

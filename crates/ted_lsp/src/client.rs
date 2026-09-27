@@ -7,13 +7,14 @@
 //!
 //! Documents are synced whole: the server gets a buffer's full text when its version has
 //! changed, once it has been stable for one sync tick, and right before any request about
-//! it.
+//! it (`prepare`).
 
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use ted_core::completion::TriggerChars;
 use ted_core::text::collapse_tilde;
 use ted_core::{BufferId, Editor};
 
@@ -35,10 +36,36 @@ enum State {
     Exited,
 }
 
+/// What a server offers besides definitions, references and diagnostics.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Capabilities {
+    pub completion: bool,
+    pub hover: bool,
+    pub rename: bool,
+    pub formatting: bool,
+    pub range_formatting: bool,
+}
+
+impl Capabilities {
+    fn from_json(caps: &Value) -> Self {
+        let provides = |name| !matches!(caps.get(name), None | Some(Value::Null) | Some(Value::Bool(false)));
+        Self {
+            completion: provides("completionProvider"),
+            hover: provides("hoverProvider"),
+            rename: provides("renameProvider"),
+            formatting: provides("documentFormattingProvider"),
+            range_formatting: provides("documentRangeFormattingProvider"),
+        }
+    }
+}
+
 pub struct Client {
     pub spec: &'static ServerSpec,
     pub root: PathBuf,
     pub encoding: Encoding,
+    capabilities: Capabilities,
+    /// Characters after which the server offers completions (`.`, `:`).
+    triggers: Vec<char>,
     /// The configuration it started with (`lsp.settings.<language>`), sent again once
     /// it is initialized.
     config: Value,
@@ -86,13 +113,27 @@ pub struct Lsp {
     failed: HashSet<(&'static str, PathBuf)>,
 }
 
-/// The server of `buffer` if it is ready for requests, with the document's URI and the
-/// server's column encoding.
-pub fn ready_document(ed: &Editor, buffer: BufferId) -> Option<(ServerId, String, Encoding)> {
+/// A document whose server is ready for requests.
+#[derive(Debug, Clone)]
+pub struct Ready {
+    pub server: ServerId,
+    pub uri: String,
+    /// How the server counts columns.
+    pub encoding: Encoding,
+}
+
+/// Buffer `buffer`'s document, if its server is ready and `supports` the request about to
+/// be made. The server's copy of the text is brought up to date first.
+pub fn prepare(ed: &mut Editor, buffer: BufferId, supports: impl Fn(&Capabilities) -> bool) -> Option<Ready> {
     let lsp = ed.ext::<Lsp>()?;
     let doc = lsp.docs.get(&buffer)?;
     let client = &lsp.clients[doc.server];
-    matches!(client.state, State::Ready).then(|| (doc.server, doc.uri.clone(), client.encoding))
+    if !matches!(client.state, State::Ready) || !supports(&client.capabilities) {
+        return None;
+    }
+    let ready = Ready { server: doc.server, uri: doc.uri.clone(), encoding: client.encoding };
+    sync(ed, buffer);
+    Some(ready)
 }
 
 /// The column encoding of the server serving `path`, if any.
@@ -145,7 +186,19 @@ pub fn attach(ed: &mut Editor, id: BufferId) {
     lsp.docs.insert(id, Document { server, uri, sent: version, seen: version });
     let keymap = handles(ed).keymap;
     ed.buffers[id].enable_keymap(keymap);
+    set_triggers(ed, id);
     diagnostics::refresh_buffer(ed, id);
+}
+
+/// Hands buffer `id` its server's completion trigger characters.
+fn set_triggers(ed: &mut Editor, id: BufferId) {
+    let Some(lsp) = ed.ext::<Lsp>() else {
+        return;
+    };
+    let triggers = lsp.docs.get(&id).map(|doc| lsp.clients[doc.server].triggers.clone()).unwrap_or_default();
+    if let Some(buf) = ed.buffers.get_mut(id) {
+        *buf.local_mut::<TriggerChars>() = TriggerChars(triggers);
+    }
 }
 
 /// Closes buffer `id` on its server.
@@ -153,6 +206,7 @@ pub fn detach(ed: &mut Editor, id: BufferId) {
     let keymap = handles(ed).keymap;
     if let Some(buf) = ed.buffers.get_mut(id) {
         buf.disable_keymap(keymap);
+        *buf.local_mut::<TriggerChars>() = TriggerChars::default();
     }
     let lsp = ed.ext_mut::<Lsp>();
     if let Some(doc) = lsp.docs.remove(&id) {
@@ -309,6 +363,8 @@ fn start(ed: &mut Editor, spec: &'static ServerSpec, command: &str, root: &Path)
         spec,
         root: root.to_path_buf(),
         encoding: Encoding::Utf16,
+        capabilities: Capabilities::default(),
+        triggers: Vec::new(),
         config,
         transport: Some(transport),
         state: State::Starting(Vec::new()),
@@ -337,8 +393,20 @@ fn initialize_params(root: &Path, root_uri: &str, settings: Value) -> Value {
                 "definition": { "linkSupport": true },
                 "references": {},
                 "publishDiagnostics": {},
+                "completion": {
+                    "completionItem": { "snippetSupport": false, "insertReplaceSupport": true, "labelDetailsSupport": true },
+                    "contextSupport": true,
+                },
+                "hover": { "contentFormat": ["markdown", "plaintext"] },
+                "rename": {},
+                "formatting": {},
+                "rangeFormatting": {},
             },
-            "workspace": { "configuration": true, "workspaceFolders": true },
+            "workspace": {
+                "configuration": true,
+                "workspaceFolders": true,
+                "workspaceEdit": { "documentChanges": true },
+            },
             "window": { "workDoneProgress": false },
         },
     })
@@ -348,7 +416,7 @@ fn initialized(ed: &mut Editor, server: ServerId, result: Result<Value, String>)
     let Some(client) = ed.ext_mut::<Lsp>().clients.get_mut(server) else {
         return;
     };
-    let capabilities = match result {
+    let result = match result {
         Ok(result) => result,
         Err(e) => {
             let msg = format!("Language server {} failed to initialize: {}", client.name(), e);
@@ -357,8 +425,11 @@ fn initialized(ed: &mut Editor, server: ServerId, result: Result<Value, String>)
             return;
         }
     };
-    let encoding = capabilities.pointer("/capabilities/positionEncoding").and_then(Value::as_str);
-    client.encoding = Encoding::from_name(encoding);
+    let caps = result.get("capabilities").unwrap_or(&Value::Null);
+    client.encoding = Encoding::from_name(caps.get("positionEncoding").and_then(Value::as_str));
+    client.capabilities = Capabilities::from_json(caps);
+    let triggers = caps.pointer("/completionProvider/triggerCharacters").and_then(Value::as_array);
+    client.triggers = triggers.into_iter().flatten().filter_map(|t| t.as_str()?.chars().next()).collect();
     let State::Starting(queued) = mem::replace(&mut client.state, State::Ready) else {
         return;
     };
@@ -369,5 +440,10 @@ fn initialized(ed: &mut Editor, server: ServerId, result: Result<Value, String>)
     }
     for message in queued {
         client.send(message);
+    }
+    let served: Vec<BufferId> =
+        ed.ext_mut::<Lsp>().docs.iter().filter(|(_, doc)| doc.server == server).map(|(&id, _)| id).collect();
+    for id in served {
+        set_triggers(ed, id);
     }
 }

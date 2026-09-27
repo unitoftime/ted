@@ -28,6 +28,8 @@ pub(crate) fn register_builtin(ed: &mut Editor) {
     crate::rows::register(ed);
     crate::locations::register(ed);
     crate::xref::register(ed);
+    crate::completion::register(ed);
+    crate::format::register(ed);
 }
 
 /// Runs a cursor motion with shift-selection semantics: a shift-translated key extends the

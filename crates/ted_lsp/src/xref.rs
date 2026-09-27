@@ -6,29 +6,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde_json::json;
+use ted_core::chain::{Backend, Reply};
 use ted_core::locations::Location;
-use ted_core::xref::{Backend, Item, Kind, Query, Reply};
+use ted_core::xref::{Item, Kind, Query};
 use ted_core::Editor;
 
 use crate::client;
-use crate::protocol::{locations_from_json, Encoding, Position, RawLocation};
+use crate::protocol::{locations_from_json, text_document_position, Encoding, RawLocation};
 
 pub struct LspBackend;
 
-impl Backend for LspBackend {
+impl Backend<Query> for LspBackend {
     fn name(&self) -> &str {
         "lsp"
     }
 
-    fn find(&self, ed: &mut Editor, query: &Query, reply: Reply) -> bool {
-        let Some((server, uri, encoding)) = client::ready_document(ed, query.buffer) else {
+    fn start(&self, ed: &mut Editor, query: &Query, reply: Reply<Query>) -> bool {
+        let Some(doc) = client::prepare(ed, query.buffer, |_| true) else {
             return false;
         };
-        client::sync(ed, query.buffer);
-        let buf = &ed.buffers[query.buffer];
-        let (line, col) = buf.char_to_point(query.pos);
-        let position = Position { line, col: encoding.to_units(buf.line(line).chars(), col) };
-        let mut params = json!({ "textDocument": { "uri": uri }, "position": position.to_json() });
+        let (server, encoding) = (doc.server, doc.encoding);
+        let mut params = text_document_position(&doc.uri, &ed.buffers[query.buffer], query.pos, encoding);
         let method = match query.kind {
             Kind::Definition => "textDocument/definition",
             Kind::References => {
@@ -46,7 +44,7 @@ impl Backend for LspBackend {
 
 /// Turns the server's locations into items with their line's text: straight from open
 /// buffers (which may hold unsaved edits), and from disk on a job thread for the rest.
-fn resolve(ed: &mut Editor, found: Vec<RawLocation>, encoding: Encoding, reply: Reply) {
+fn resolve(ed: &mut Editor, found: Vec<RawLocation>, encoding: Encoding, reply: Reply<Query>) {
     let mut items = Vec::with_capacity(found.len());
     let mut on_disk = Vec::new();
     for raw in found {

@@ -553,12 +553,21 @@ impl Editor {
         self.scheduler.add_timer(interval, run);
     }
 
+    /// Runs `run` once on the UI thread after `delay`.
+    pub fn after(&mut self, delay: Duration, run: impl FnOnce(&mut Editor) + 'static) {
+        self.scheduler.add_timeout(delay, run);
+    }
+
     /// Runs finished job results and due timers. Returns whether the display may have changed.
     pub fn poll(&mut self, now: Instant) -> bool {
         let results = self.scheduler.take_results();
-        let mut changed = !results.is_empty();
+        let timeouts = self.scheduler.take_due_timeouts(now);
+        let mut changed = !results.is_empty() || !timeouts.is_empty();
         for task in results {
             task(self);
+        }
+        for timeout in timeouts {
+            timeout(self);
         }
         for timer in self.scheduler.take_due_timers(now) {
             changed |= timer(self);

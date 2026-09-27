@@ -19,6 +19,12 @@ pub fn register(ed: &mut Editor) {
         find_file_prompt(ed, anchor);
     });
     c.register("save-buffer", "Save the active buffer to its file", |ed, _| save_active(ed));
+    c.register("save-some-buffers", "Offer to save each modified file", |ed, _| {
+        if modified_files(ed).is_empty() {
+            ed.set_status("No files need saving");
+        }
+        save_some_buffers(ed, |_| {});
+    });
     c.register("save-buffer-as", "Save the active buffer to a new path (write-file)", |ed, _| {
         save_as_prompt(ed, "Write file: ");
     });
@@ -97,20 +103,25 @@ fn ask_to_save(ed: &mut Editor, mut pending: Vec<BufferId>, then: Continuation) 
     let on_disk = if buf.is_modified_on_disk() { " (changed on disk!)" } else { "" };
     let label = format!("Save {}{}? (y)es (n)o (!) all (q)uit: ", path, on_disk);
     let choice = Choice::new("save-some-buffers", label, "yn!q", move |ed, key| {
-        let (save, rest): (&[BufferId], &[BufferId]) = match key {
-            'y' => (&pending[..1], &pending[1..]),
-            'n' => (&[], &pending[1..]),
-            '!' => (&pending, &[]),
-            _ => {
-                ed.set_status("Canceled");
-                return;
-            }
-        };
-        if save.iter().all(|&id| write(ed, id)) {
-            ask_to_save(ed, rest.to_vec(), then);
+        let rest = pending[1..].to_vec();
+        match key {
+            'y' => write(ed, id, move |ed| ask_to_save(ed, rest, then)),
+            'n' => ask_to_save(ed, rest, then),
+            '!' => write_all(ed, pending, then),
+            _ => ed.set_status("Canceled"),
         }
     });
     ed.push_modal(choice);
+}
+
+/// Saves `ids` one after another, then runs `then`; stops at a failure.
+fn write_all(ed: &mut Editor, mut ids: Vec<BufferId>, then: Continuation) {
+    if ids.is_empty() {
+        then(ed);
+        return;
+    }
+    let id = ids.remove(0);
+    write(ed, id, move |ed| write_all(ed, ids, then));
 }
 
 /// `dir` as the initial text of a file prompt.
@@ -200,25 +211,22 @@ fn save_active(ed: &mut Editor) {
         ed.confirm("overwrite-disk", label, move |ed, yes| {
             if yes {
                 ed.buffers[id].acknowledge_disk_version();
-                write(ed, id);
+                write(ed, id, |_| {});
             } else {
                 ed.set_status("Save cancelled (file modified on disk)");
             }
         });
         return;
     }
-    write(ed, id);
+    write(ed, id, |_| {});
 }
 
-/// Saves `id`, reporting a failure in the status line. Returns whether it saved.
-fn write(ed: &mut Editor, id: BufferId) -> bool {
-    match ed.save_buffer(id) {
-        Ok(()) => true,
-        Err(e) => {
-            ed.set_status(format!("Error saving file: {}", e));
-            false
-        }
-    }
+/// Saves `id`, then runs `then` if it saved; a failure is reported in the status line.
+fn write(ed: &mut Editor, id: BufferId, then: impl FnOnce(&mut Editor) + 'static) {
+    ed.save_buffer(id, move |ed, result| match result {
+        Ok(()) => then(ed),
+        Err(e) => ed.set_status(format!("Error saving file: {}", e)),
+    });
 }
 
 /// What a switcher entry leads to.

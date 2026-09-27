@@ -65,18 +65,18 @@ fn test_picker_helm_filtering_and_navigation() {
         PickerItem::new("main.rs", "crates/ted_gui/src/main.rs"),
     ];
     editor.pick("test", "Recent Files", items, |_, _| {});
-    assert_eq!(picker(&editor).filtered.len(), 3);
+    assert_eq!(picker(&editor).filtered().len(), 3);
     assert_eq!(picker(&editor).selected, 0);
 
     // Multi-token query
     type_keys(&mut editor, "ted edit");
-    assert_eq!(picker(&editor).filtered.len(), 1);
+    assert_eq!(picker(&editor).filtered().len(), 1);
     assert_eq!(picker(&editor).selected_item().unwrap().title, "editor.rs");
 
     // Clear the query
     editor.handle_key(KeyEvent::ctrl('a'));
     editor.handle_key(KeyEvent::ctrl('k'));
-    assert_eq!(picker(&editor).filtered.len(), 3);
+    assert_eq!(picker(&editor).filtered().len(), 3);
 
     editor.handle_key(KeyEvent::ctrl('n'));
     assert_eq!(picker(&editor).selected, 1);
@@ -125,7 +125,7 @@ fn test_editor_recentf_workflow() {
     assert_eq!(picker(&editor).id(), "recentf");
 
     type_keys(&mut editor, "alpha");
-    assert_eq!(picker(&editor).filtered.len(), 1);
+    assert_eq!(picker(&editor).filtered().len(), 1);
 
     editor.handle_key(KeyEvent::plain(KeyCode::Enter));
     assert!(!editor.has_modal());

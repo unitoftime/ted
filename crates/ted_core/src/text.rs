@@ -5,6 +5,11 @@ use std::ffi::OsStr;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+/// Whether `c` can be part of an identifier (a symbol to look up or complete).
+pub fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 /// Chars to move backward over: trailing non-word chars, then the word itself.
 /// `chars_rev` yields characters walking backward from the cursor.
 pub fn word_len_backward(chars_rev: impl Iterator<Item = char>) -> usize {
@@ -89,6 +94,38 @@ pub fn truncate_with_ellipsis(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Breaks `text` into lines of at most `width` chars, between words where it can.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut len = 0;
+    for word in text.split(' ') {
+        let mut word_len = word.chars().count();
+        if len > 0 && len + 1 + word_len > width {
+            lines.push(std::mem::take(&mut line));
+            len = 0;
+        }
+        if len > 0 {
+            line.push(' ');
+            len += 1;
+        }
+        let mut rest = word;
+        while len + word_len > width {
+            let split = rest.char_indices().nth(width - len).map_or(rest.len(), |(i, _)| i);
+            line.push_str(&rest[..split]);
+            lines.push(std::mem::take(&mut line));
+            rest = &rest[split..];
+            word_len -= width - len;
+            len = 0;
+        }
+        line.push_str(rest);
+        len += word_len;
+    }
+    lines.push(line);
+    lines
 }
 
 /// Labels for `paths` as short as they can be while telling them apart: each is its file

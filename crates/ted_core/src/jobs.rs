@@ -16,6 +16,7 @@ use crate::editor::Editor;
 
 type UiTask = Box<dyn FnOnce(&mut Editor) + Send>;
 type TimerFn = Rc<dyn Fn(&mut Editor) -> bool>;
+pub(crate) type TimeoutFn = Box<dyn FnOnce(&mut Editor)>;
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// Cancels a job: its pending and future results are dropped, and the job can observe
@@ -74,12 +75,14 @@ pub struct Scheduler {
     rx: Receiver<(JobHandle, UiTask)>,
     waker: Arc<OnceLock<Waker>>,
     timers: Vec<Timer>,
+    /// One-shot timers: (when, what).
+    timeouts: Vec<(Instant, TimeoutFn)>,
 }
 
 impl Default for Scheduler {
     fn default() -> Self {
         let (tx, rx) = unbounded();
-        Self { tx, rx, waker: Arc::new(OnceLock::new()), timers: Vec::new() }
+        Self { tx, rx, waker: Arc::new(OnceLock::new()), timers: Vec::new(), timeouts: Vec::new() }
     }
 }
 
@@ -104,6 +107,10 @@ impl Scheduler {
         self.timers.push(Timer { interval, due: Instant::now() + interval, run: Rc::new(run) });
     }
 
+    pub(crate) fn add_timeout(&mut self, delay: Duration, run: impl FnOnce(&mut Editor) + 'static) {
+        self.timeouts.push((Instant::now() + delay, Box::new(run)));
+    }
+
     /// Results that arrived from jobs that are still wanted.
     pub(crate) fn take_results(&self) -> Vec<UiTask> {
         self.rx.try_iter().filter(|(job, _)| !job.is_cancelled()).map(|(_, task)| task).collect()
@@ -121,7 +128,15 @@ impl Scheduler {
         due
     }
 
+    /// One-shot timers due at `now`, removed.
+    pub(crate) fn take_due_timeouts(&mut self, now: Instant) -> Vec<TimeoutFn> {
+        let (due, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.timeouts).into_iter().partition(|(at, _)| *at <= now);
+        self.timeouts = waiting;
+        due.into_iter().map(|(_, run)| run).collect()
+    }
+
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.timers.iter().map(|t| t.due).min()
+        self.timers.iter().map(|t| t.due).chain(self.timeouts.iter().map(|(at, _)| *at)).min()
     }
 }

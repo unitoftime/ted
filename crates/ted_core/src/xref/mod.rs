@@ -1,10 +1,8 @@
 //! Cross-references: `find-definition`, `find-references`, and a jump stack to hop back.
 //!
-//! The commands don't know where answers come from. A `Backend` (a language server,
-//! tree-sitter tags) answers a `Query` asynchronously through the `Reply` it is handed.
-//! Backends are tried in priority order: one that declines the query, fails, or finds
-//! nothing hands it to the next, so tree-sitter covers for a server that is missing, still
-//! indexing, or stumped.
+//! The commands don't know where answers come from: a `Query` goes down a backend chain
+//! (see `chain`), language servers first, then tree-sitter tags, so tree-sitter covers for
+//! a server that is missing, still indexing, or stumped.
 //!
 //! One definition is visited directly and several are offered in a picker; references fill
 //! the `*xref*` location list, so `next-error` steps through them. Every jump pushes the
@@ -14,12 +12,12 @@ mod tags;
 
 use std::ops::Range;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use crate::buffer::{Buffer, BufferId};
+use crate::chain::{self, Request};
 use crate::editor::Editor;
 use crate::locations::{self, ListItem, Location, Severity};
-use crate::text::{collapse_tilde, trim_highlighted};
+use crate::text::{collapse_tilde, is_ident_char, trim_highlighted};
 use crate::ui::PickerItem;
 
 pub use tags::TagsBackend;
@@ -49,50 +47,29 @@ pub struct Item {
     pub text: String,
 }
 
-pub trait Backend {
-    fn name(&self) -> &str;
+impl Request for Query {
+    type Answer = Vec<Item>;
 
-    /// Starts answering `query`, eventually calling `reply.send`. Returns false (without
-    /// using `reply`) to decline, e.g. when no server handles the buffer.
-    fn find(&self, ed: &mut Editor, query: &Query, reply: Reply) -> bool;
-}
+    /// Answers to queries the user has moved on from are dropped.
+    fn is_current(&self, ed: &Editor) -> bool {
+        ed.active_buffer_id() == self.buffer && ed.active_view().cursor.pos == self.pos && !ed.has_modal()
+    }
 
-/// The way back to the query a backend is answering. It is plain data, so a backend can
-/// carry it through a job thread and send it back with the answer.
-#[derive(Debug)]
-#[must_use = "a query stays pending until its reply is sent"]
-pub struct Reply {
-    serial: u64,
-    /// Index of the backend to try next if this one comes up empty.
-    next: usize,
-}
+    fn is_empty(items: &Vec<Item>) -> bool {
+        items.is_empty()
+    }
 
-impl Reply {
-    /// Delivers a backend's answer. An error or an empty answer passes the query on to the
-    /// next backend. Answers to queries the user has moved on from are dropped.
-    pub fn send(self, ed: &mut Editor, result: Result<Vec<Item>, String>) {
-        let pending = ed.ext_mut::<Xref>().pending.as_ref().filter(|p| p.serial == self.serial);
-        let Some(query) = pending.map(|p| p.query.clone()) else {
-            return;
+    fn answer(self, ed: &mut Editor, items: Vec<Item>) {
+        present(ed, &self, items);
+    }
+
+    fn unanswered(self, ed: &mut Editor, errors: Vec<String>) {
+        let what = match self.kind {
+            Kind::Definition => "definition",
+            Kind::References => "references",
         };
-        let moved = ed.active_buffer_id() != query.buffer || ed.active_view().cursor.pos != query.pos;
-        if moved || ed.has_modal() {
-            ed.ext_mut::<Xref>().pending = None;
-            return;
-        }
-        match result {
-            Ok(items) if !items.is_empty() => {
-                ed.ext_mut::<Xref>().pending = None;
-                present(ed, &query, items);
-            }
-            Ok(_) => try_backends(ed, self.serial, self.next),
-            Err(e) => {
-                if let Some(pending) = &mut ed.ext_mut::<Xref>().pending {
-                    pending.errors.push(e);
-                }
-                try_backends(ed, self.serial, self.next);
-            }
-        }
+        let reason = errors.first().map(|e| format!(" ({})", e)).unwrap_or_default();
+        ed.set_status(format!("No {} found for '{}'{}", what, self.symbol, reason));
     }
 }
 
@@ -105,53 +82,35 @@ struct Mark {
     pos: usize,
 }
 
-struct Pending {
-    serial: u64,
-    query: Query,
-    errors: Vec<String>,
-}
-
 #[derive(Default)]
-struct Xref {
-    /// Highest priority first.
-    backends: Vec<(i32, Rc<dyn Backend>)>,
-    pending: Option<Pending>,
-    serial: u64,
+struct Jumps {
     back: Vec<Mark>,
     forward: Vec<Mark>,
-}
-
-/// Adds a backend. Higher `priority` is asked first; tree-sitter tags sit at 0.
-pub fn register_backend(ed: &mut Editor, priority: i32, backend: impl Backend + 'static) {
-    let backends = &mut ed.ext_mut::<Xref>().backends;
-    let at = backends.partition_point(|(p, _)| *p >= priority);
-    backends.insert(at, (priority, Rc::new(backend)));
 }
 
 /// Remembers the active position on the jump stack, as every xref jump does. Other jumps
 /// (plugins, custom commands) can use it to make themselves reversible with `M-,`.
 pub fn push_mark(ed: &mut Editor) {
     let mark = current_mark(ed);
-    let xref = ed.ext_mut::<Xref>();
-    xref.forward.clear();
-    xref.back.push(mark);
-    if xref.back.len() > MAX_JUMPS {
-        xref.back.remove(0);
+    let jumps = ed.ext_mut::<Jumps>();
+    jumps.forward.clear();
+    jumps.back.push(mark);
+    if jumps.back.len() > MAX_JUMPS {
+        jumps.back.remove(0);
     }
 }
 
 /// The identifier at `pos`, or just before it (point right after a word), as a char range
 /// and its text.
 pub fn symbol_at(buf: &Buffer, pos: usize) -> Option<(std::ops::Range<usize>, String)> {
-    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let text = buf.text();
     let at = match buf.char_at(pos) {
-        Some(c) if is_ident(c) => pos,
-        _ if pos > 0 && buf.char_at(pos - 1).is_some_and(is_ident) => pos - 1,
+        Some(c) if is_ident_char(c) => pos,
+        _ if pos > 0 && buf.char_at(pos - 1).is_some_and(is_ident_char) => pos - 1,
         _ => return None,
     };
-    let start = at - text.chars_at(at).reversed().take_while(|&c| is_ident(c)).count();
-    let end = at + text.chars_at(at).take_while(|&c| is_ident(c)).count();
+    let start = at - text.chars_at(at).reversed().take_while(|&c| is_ident_char(c)).count();
+    let end = at + text.chars_at(at).take_while(|&c| is_ident_char(c)).count();
     Some((start..end, buf.slice_to_string(start..end)))
 }
 
@@ -169,7 +128,7 @@ pub(crate) fn register(ed: &mut Editor) {
     c.register("xref-go-forward", "Undo an xref-go-back", |ed, _| {
         hop(ed, false);
     });
-    register_backend(ed, 0, TagsBackend);
+    chain::register(ed, 0, TagsBackend);
 }
 
 fn start(ed: &mut Editor, kind: Kind) {
@@ -179,38 +138,11 @@ fn start(ed: &mut Editor, kind: Kind) {
         ed.set_status("No symbol at point");
         return;
     };
-    let xref = ed.ext_mut::<Xref>();
-    xref.serial += 1;
-    let serial = xref.serial;
-    xref.pending =
-        Some(Pending { serial, query: Query { kind, buffer, pos, symbol: symbol.clone() }, errors: Vec::new() });
     ed.set_status(match kind {
         Kind::Definition => format!("Finding definition of '{}'...", symbol),
         Kind::References => format!("Finding references to '{}'...", symbol),
     });
-    try_backends(ed, serial, 0);
-}
-
-/// Hands pending query `serial` to the first backend from index `from` that accepts it;
-/// reports failure when none is left.
-fn try_backends(ed: &mut Editor, serial: u64, from: usize) {
-    let xref = ed.ext_mut::<Xref>();
-    let Some(query) = xref.pending.as_ref().filter(|p| p.serial == serial).map(|p| p.query.clone()) else {
-        return;
-    };
-    let backends: Vec<_> = xref.backends.iter().skip(from).map(|(_, b)| b.clone()).collect();
-    for (i, backend) in backends.into_iter().enumerate() {
-        if backend.find(ed, &query, Reply { serial, next: from + i + 1 }) {
-            return;
-        }
-    }
-    let errors = ed.ext_mut::<Xref>().pending.take().map(|p| p.errors).unwrap_or_default();
-    let what = match query.kind {
-        Kind::Definition => "definition",
-        Kind::References => "references",
-    };
-    let reason = errors.first().map(|e| format!(" ({})", e)).unwrap_or_default();
-    ed.set_status(format!("No {} found for '{}'{}", what, query.symbol, reason));
+    chain::ask(ed, Query { kind, buffer, pos, symbol });
 }
 
 fn present(ed: &mut Editor, query: &Query, mut items: Vec<Item>) {
@@ -273,8 +205,8 @@ fn current_mark(ed: &Editor) -> Mark {
 /// position on the other stack. Marks whose buffer and file are both gone are skipped.
 fn hop(ed: &mut Editor, back: bool) {
     loop {
-        let xref = ed.ext_mut::<Xref>();
-        let stack = if back { &mut xref.back } else { &mut xref.forward };
+        let jumps = ed.ext_mut::<Jumps>();
+        let stack = if back { &mut jumps.back } else { &mut jumps.forward };
         let Some(mark) = stack.pop() else {
             ed.set_status(if back { "Jump stack is empty" } else { "No newer jump" });
             return;
@@ -283,8 +215,8 @@ fn hop(ed: &mut Editor, back: bool) {
         if !show_mark(ed, &mark) {
             continue;
         }
-        let xref = ed.ext_mut::<Xref>();
-        let other = if back { &mut xref.forward } else { &mut xref.back };
+        let jumps = ed.ext_mut::<Jumps>();
+        let other = if back { &mut jumps.forward } else { &mut jumps.back };
         other.push(here);
         return;
     }

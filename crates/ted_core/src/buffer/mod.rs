@@ -4,6 +4,7 @@
 //! by `BufferId`; views refer to them by id. Nothing here locks or allocates per access.
 
 mod decorations;
+mod edits;
 mod history;
 mod search;
 mod styled;
@@ -19,6 +20,7 @@ use std::time::SystemTime;
 use ropey::{Rope, RopeSlice};
 
 pub use decorations::{Decoration, Decorations};
+pub use edits::{map_pos, Edit};
 pub use history::{EditGroup, EditKind, TreeDisplayLine, UndoNode, UndoTree};
 pub use styled::StyledText;
 

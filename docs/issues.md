@@ -9,7 +9,7 @@
   buffers, and replace legacy Emacs conventions where a simpler interface works better.
 - [ ] **Remote editing over SSH.** Open `/ssh:host:path` paths directly instead of running
   an editor inside the terminal.
-- [ ] **More language server features.** Completion, hover, rename and formatting.
+- [x] **More language server features.** Completion, hover, rename and formatting.
 
 ## Bugs
 

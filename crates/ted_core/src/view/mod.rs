@@ -71,6 +71,8 @@ pub struct View {
     /// Geometry of the last render; drives paging, wrapping and hit-testing.
     pub(crate) bounds: Rect,
     pub(crate) metrics: Metrics,
+    /// Where the last render drew the cursor, if it was on screen.
+    pub(crate) caret: Option<Rect>,
 }
 
 impl View {
@@ -89,6 +91,7 @@ impl View {
             scrolled_from: None,
             bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
             metrics: Metrics::default(),
+            caret: None,
         }
     }
 
@@ -109,6 +112,12 @@ impl View {
 
     pub fn bounds(&self) -> Rect {
         self.bounds
+    }
+
+    /// The cell the cursor was drawn in by the last render, if it was on screen: where
+    /// popups about point (completions, hover) attach.
+    pub fn caret(&self) -> Option<Rect> {
+        self.caret
     }
 
     /// The row and the nearest column boundary of frame point `(x, y)`, counted from the

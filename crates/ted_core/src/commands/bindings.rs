@@ -73,6 +73,7 @@ const GLOBAL: &[(&str, &str)] = &[
     // Search
     ("C-s", "search-forward"),
     ("C-r", "search-backward"),
+    ("C-M-i", "completion-at-point"),
     // Cross-references
     ("M-.", "find-definition"),
     ("M-,", "xref-go-back"),
@@ -155,6 +156,22 @@ const PICKER: &[(&str, &str)] = &[
     ("C-c", "modal-quit"),
 ];
 
+/// The completion popup. Other keys close it and then act as usual (word characters type
+/// on, narrowing the candidates).
+const COMPLETION: &[(&str, &str)] = &[
+    ("TAB", "completion-accept"),
+    ("RET", "completion-accept"),
+    ("<down>", "completion-next"),
+    ("C-n", "completion-next"),
+    ("<up>", "completion-previous"),
+    ("C-p", "completion-previous"),
+    ("DEL", "completion-delete-backward-char"),
+    ("C-g", "modal-quit"),
+    ("ESC", "modal-quit"),
+];
+
+const TOOLTIP: &[(&str, &str)] = &[("C-g", "modal-quit"), ("ESC", "modal-quit")];
+
 const CHOICE: &[(&str, &str)] = &[("C-g", "modal-quit"), ("ESC", "modal-quit")];
 
 const MENU: &[(&str, &str)] = &[("C-g", "modal-quit"), ("ESC", "modal-quit")];
@@ -213,6 +230,8 @@ pub(crate) fn install_defaults(ed: &mut Editor) {
     ed.bind_all("undo-tree", UNDO_TREE);
     ed.bind_all("jump", JUMP);
     ed.bind_all("special", SPECIAL);
+    ed.bind_all("completion", COMPLETION);
+    ed.bind_all("tooltip", TOOLTIP);
 
     let self_insert = [
         (KeymapId::GLOBAL, "self-insert-command"),
@@ -226,4 +245,6 @@ pub(crate) fn install_defaults(ed: &mut Editor) {
     }
     // Keys search doesn't use end it where it is, then act on the buffer (C-n, C-v, M-x).
     ed.keymaps.get_mut(KeymapId::SEARCH).fallback = ed.commands.id("search-exit-and-replay");
+    ed.keymaps.get_mut(KeymapId::COMPLETION).fallback = ed.commands.id("completion-key");
+    ed.keymaps.get_mut(KeymapId::TOOLTIP).fallback = ed.commands.id("tooltip-exit-and-replay");
 }
