@@ -7,8 +7,9 @@
   its results first.
 - [ ] **Modernize generated buffers.** Review directory listings, git and other generated
   buffers, and replace legacy Emacs conventions where a simpler interface works better.
-- [ ] **Remote editing over SSH.** Open `/ssh:host:path` paths directly instead of running
-  an editor inside the terminal.
+- [ ] **Remote hosts over SSH.** Work on a machine over SSH as if it were local: files,
+  directory listings, search, builds, git, terminals and language servers, all fast enough
+  that it doesn't feel remote.
 - [x] **More language server features.** Completion, hover, rename and formatting.
 - [ ] Package a few high-quality fonts inside the editor?
 

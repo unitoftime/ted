@@ -226,8 +226,8 @@ impl Doc<'_> {
         }
     }
 
-    /// Name, modified marker and mode (unless the name says it); `position` adds line/column
-    /// info for text buffers.
+    /// Name, modified marker and mode (unless the name says it); `position` adds the line
+    /// and column for text buffers.
     fn render_modeline(
         &self,
         frame: &mut Frame,
@@ -242,15 +242,7 @@ impl Doc<'_> {
         let rect = Rect::new(bounds.x, y, bounds.w, m.line_h);
         frame.fill_rect(rect, cx.faces.bg(face));
 
-        let location = match position {
-            Some((line, col)) => {
-                let total = self.buf.len_lines();
-                let pct = if total > 1 { line * 100 / (total - 1) } else { 100 };
-                let wrap = if self.view.wrap { " [Wrap]" } else { "" };
-                format!("{}   L{}:C{}   {}% ({} lines)", wrap, line + 1, col + 1, pct, total)
-            }
-            None => String::new(),
-        };
+        let location = position.map_or_else(String::new, |(line, col)| format!("   L{}:C{}", line + 1, col + 1));
         let dirty = if self.buf.is_dirty() { "*" } else { " " };
         let (name, mode) = (self.buf.name(), &self.buf.mode().name);
         // Generated buffers are named after their mode (`terminal`, `git log: ted`).

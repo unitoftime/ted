@@ -99,13 +99,6 @@ fn test_overflow_clipping_and_wrapping() {
     let clip = span.clip.expect("clip rect");
     assert!(clip.w <= 400.0);
     assert_eq!(clip.x, span.x, "Clip starts where the text starts (after the gutter)");
-
-    // Wrapped: the modeline shows [Wrap]
-    editor.execute("toggle-word-wrap");
-    assert!(editor.active_view().wrap);
-    frame.clear(400.0, 300.0, Color::BLACK);
-    editor.render(&mut frame, metrics);
-    assert!(text_spans(&frame).any(|s| s.text.contains("[Wrap]")));
 }
 
 #[test]
