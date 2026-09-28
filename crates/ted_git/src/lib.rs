@@ -35,7 +35,7 @@ mod status;
 
 use std::path::{Path, PathBuf};
 
-use ted_core::{BufferId, Editor, Face, FaceId, Faces, Mode, Plugin};
+use ted_core::{BufferId, BufferScope, Editor, Face, FaceId, Faces, KeymapDef, Mode, Plugin};
 
 use crate::changes::Action;
 use crate::git::args;
@@ -122,13 +122,7 @@ pub(crate) fn repo(ed: &Editor) -> Option<PathBuf> {
 /// The generated buffer in `mode` for repository `root`, created if needed, named
 /// `<kind>: <repository>`.
 pub(crate) fn generated_buffer(ed: &mut Editor, kind: &str, mode: &str, root: &Path) -> BufferId {
-    let found = ed.buffers.find(|b| b.path().is_none() && b.mode().name == mode && b.directory() == root);
-    if let Some(id) = found {
-        return id;
-    }
-    let id = ed.new_buffer(format!("{}: {}", kind, repo_name(root)), mode);
-    ed.buffers[id].set_directory(root);
-    id
+    ed.generated_buffer(&format!("{}: {}", kind, repo_name(root)), mode, BufferScope::Dir(root))
 }
 
 fn repo_name(root: &Path) -> String {
@@ -188,9 +182,7 @@ impl Plugin for GitPlugin {
             ("git-unstage", "Unstage the change at point", Action::Unstage),
             ("git-discard", "Discard the change at point", Action::Discard),
         ] {
-            c.register(name, doc, move |ed, _| {
-                at_point(ed, |ed| status::act(ed, action), |ed| diff::act(ed, action))
-            });
+            c.register(name, doc, move |ed, _| at_point(ed, |ed| status::act(ed, action), |ed| diff::act(ed, action)));
         }
         c.register("git-log-visit", "Show the commit at point", |ed, _| log::visit(ed));
         c.register("git-diff-refresh", "Rerun the diff", |ed, _| diff::rerun(ed));
@@ -228,48 +220,42 @@ impl Plugin for GitPlugin {
                         "git-process",
                         "quit-window",
                     ],
-                ),
+                )
+                .keys(&[
+                    ("TAB", "git-toggle"),
+                    ("RET", "git-visit"),
+                    ("s", "git-stage"),
+                    ("S", "git-stage-all"),
+                    ("u", "git-unstage"),
+                    ("U", "git-unstage-all"),
+                    ("k", "git-discard"),
+                    ("c", "git-commit"),
+                    ("P", "git-push"),
+                    ("F", "git-pull"),
+                    ("f", "git-fetch"),
+                    ("b", "git-branch"),
+                    ("l", "git-log"),
+                    ("d", "git-diff"),
+                    ("z", "git-stash"),
+                    ("$", "git-process"),
+                ]),
         );
-        ed.define_mode(Mode::new(log::MODE).special().revert("git-log"));
-        ed.define_mode(Mode::new(diff::MODE).special().revert("git-diff-refresh"));
+        ed.define_mode(Mode::new(log::MODE).special().revert("git-log").keys(&[
+            ("RET", "git-log-visit"),
+            ("d", "git-diff"),
+            ("$", "git-process"),
+        ]));
+        ed.define_mode(Mode::new(diff::MODE).special().revert("git-diff-refresh").keys(&[
+            ("TAB", "git-toggle"),
+            ("RET", "git-visit"),
+            ("s", "git-stage"),
+            ("u", "git-unstage"),
+            ("k", "git-discard"),
+            ("d", "git-diff"),
+            ("$", "git-process"),
+        ]));
         ed.define_mode(Mode::new(process::MODE).special());
         ed.define_mode(commit::mode());
-
-        ed.bind_all("global", &[("C-x g", "git-status")]);
-        ed.bind_all(
-            "git-status",
-            &[
-                ("TAB", "git-toggle"),
-                ("RET", "git-visit"),
-                ("s", "git-stage"),
-                ("S", "git-stage-all"),
-                ("u", "git-unstage"),
-                ("U", "git-unstage-all"),
-                ("k", "git-discard"),
-                ("c", "git-commit"),
-                ("P", "git-push"),
-                ("F", "git-pull"),
-                ("f", "git-fetch"),
-                ("b", "git-branch"),
-                ("l", "git-log"),
-                ("d", "git-diff"),
-                ("z", "git-stash"),
-                ("$", "git-process"),
-            ],
-        );
-        ed.bind_all("git-log", &[("RET", "git-log-visit"), ("d", "git-diff"), ("$", "git-process")]);
-        ed.bind_all(
-            "git-diff",
-            &[
-                ("TAB", "git-toggle"),
-                ("RET", "git-visit"),
-                ("s", "git-stage"),
-                ("u", "git-unstage"),
-                ("k", "git-discard"),
-                ("d", "git-diff"),
-                ("$", "git-process"),
-            ],
-        );
-        ed.bind_all("git-commit", &[("C-c C-c", "git-commit-finish"), ("C-c C-k", "git-commit-cancel")]);
+        ed.define_keymap(KeymapDef::new("global").keys(&[("C-x g", "git-status")]));
     }
 }

@@ -1,5 +1,5 @@
 //! Default key bindings, as data. Users override any of these from `init.rhai` with
-//! `bind`, `bind_mode`, `unbind` and `unbind_mode`, using the same notation.
+//! `bind` and `unbind`, using the same notation.
 //!
 //! Defaults are what any user of the editor should get. Personal choices belong in
 //! `init.rhai`, and `C-c <key>` in the global map is reserved for them: defaults (built-in
@@ -7,7 +7,7 @@
 //! `C-c C-<key>`; minor keymaps `C-c <punctuation>` (`C-c !`).
 
 use crate::editor::Editor;
-use crate::keymap::KeymapId;
+use crate::keymap::KeymapDef;
 
 /// Motion and editing within a line. Bound globally and in every modal text input (a
 /// one-line buffer), so prompts edit like any other buffer.
@@ -216,38 +216,29 @@ const UNDO_TREE: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn install_defaults(ed: &mut Editor) {
-    ed.bind_all("global", LINE_EDITING);
-    ed.bind_all("global", GLOBAL);
-    for (key, command) in CTRL_X {
-        ed.bind_all("global", &[(&format!("C-x {}", key), command), (&format!("C-x C-{}", key), command)]);
-    }
-    ed.bind_all("global", PREFIX_HELP);
-    ed.bind_all("input", LINE_EDITING);
-    ed.bind_all("input", INPUT);
-    ed.bind_all("minibuffer", MINIBUFFER);
-    ed.bind_all("search", SEARCH);
-    ed.bind_all("picker", PICKER);
-    ed.bind_all("file-search", FILE_SEARCH);
-    ed.bind_all("choice", CHOICE);
-    ed.bind_all("menu", MENU);
-    ed.bind_all("undo-tree", UNDO_TREE);
-    ed.bind_all("jump", JUMP);
-    ed.bind_all("special", SPECIAL);
-    ed.bind_all("completion", COMPLETION);
-    ed.bind_all("tooltip", TOOLTIP);
-
-    let self_insert = [
-        (KeymapId::GLOBAL, "self-insert-command"),
-        (KeymapId::INPUT, "self-insert-command"),
-        (KeymapId::CHOICE, "choice-select"),
-        (KeymapId::MENU, "menu-select"),
-        (KeymapId::JUMP, "jump-input"),
+    let ctrl_x = CTRL_X.iter().fold(KeymapDef::new("global"), |def, (key, command)| {
+        def.bind(format!("C-x {}", key), *command).bind(format!("C-x C-{}", key), *command)
+    });
+    let modal = |name: &str| KeymapDef::new(name).opaque();
+    let keymaps = [
+        KeymapDef::new("global").self_insert("self-insert-command").keys(LINE_EDITING).keys(GLOBAL),
+        ctrl_x,
+        KeymapDef::new("global").keys(PREFIX_HELP),
+        modal("input").self_insert("self-insert-command").keys(LINE_EDITING).keys(INPUT),
+        KeymapDef::new("minibuffer").parent("input").keys(MINIBUFFER),
+        // Keys search doesn't use end it where it is, then act on the buffer (C-n, C-v, M-x).
+        KeymapDef::new("search").parent("input").fallback("search-exit-and-replay").keys(SEARCH),
+        KeymapDef::new("picker").parent("input").keys(PICKER),
+        KeymapDef::new("file-search").parent("picker").keys(FILE_SEARCH),
+        modal("choice").self_insert("choice-select").keys(CHOICE),
+        modal("menu").self_insert("menu-select").keys(MENU),
+        modal("undo-tree").keys(UNDO_TREE),
+        modal("jump").self_insert("jump-input").keys(JUMP),
+        KeymapDef::new("special").keys(SPECIAL),
+        modal("completion").fallback("completion-key").keys(COMPLETION),
+        modal("tooltip").fallback("tooltip-exit-and-replay").keys(TOOLTIP),
     ];
-    for (map, command) in self_insert {
-        ed.keymaps.get_mut(map).self_insert = ed.commands.id(command);
+    for keymap in keymaps {
+        ed.define_keymap(keymap);
     }
-    // Keys search doesn't use end it where it is, then act on the buffer (C-n, C-v, M-x).
-    ed.keymaps.get_mut(KeymapId::SEARCH).fallback = ed.commands.id("search-exit-and-replay");
-    ed.keymaps.get_mut(KeymapId::COMPLETION).fallback = ed.commands.id("completion-key");
-    ed.keymaps.get_mut(KeymapId::TOOLTIP).fallback = ed.commands.id("tooltip-exit-and-replay");
 }

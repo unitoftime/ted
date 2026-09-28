@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ted_core::{Editor, FaceId, StyledText};
+use ted_core::{Editor, FaceId, KeymapDef, StyledText};
 
 use crate::git::{args, git};
 use crate::{diff, repo, GitFaces};
@@ -55,17 +55,13 @@ pub fn register(ed: &mut Editor) {
         step(ed, false)
     });
     c.register("git-blame-quit", "Stop blaming this buffer", |ed, _| quit(ed));
-    ed.keymaps.ensure(KEYMAP);
-    ed.bind_all(
-        KEYMAP,
-        &[
-            ("RET", "git-blame-visit"),
-            ("n", "git-blame-next-chunk"),
-            ("p", "git-blame-previous-chunk"),
-            ("q", "git-blame-quit"),
-            ("h", "mode-help"),
-        ],
-    );
+    ed.define_keymap(KeymapDef::new(KEYMAP).keys(&[
+        ("RET", "git-blame-visit"),
+        ("n", "git-blame-next-chunk"),
+        ("p", "git-blame-previous-chunk"),
+        ("q", "git-blame-quit"),
+        ("h", "mode-help"),
+    ]));
 }
 
 fn toggle(ed: &mut Editor) {

@@ -4,21 +4,33 @@
 //! bindings shadow the global map in buffers using the mode. Mode-specific behavior (dired's
 //! RET, markdown list continuation) is just commands bound in that keymap.
 //!
-//! `Editor::define_mode` registers a mode together with its keymap, which is named after
-//! the mode in kebab-case ("Git Log" -> `git-log`), so `init.rhai` binds keys in a mode
-//! with `bind_mode("git-log", ...)` and changes its settings with `mode("git-log", ...)`.
+//! A mode carries its keymap's definition (`Mode::keys`, `Mode::keymap`), and
+//! `Editor::define_mode` installs both. The keymap is named after the mode in kebab-case
+//! ("Git Log" -> `git-log`), so `init.rhai` binds keys in a mode with
+//! `bind("git-log", ...)` and changes its settings with `mode("git-log", ...)`.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use crate::face::FaceId;
-use crate::keymap::KeymapId;
+use crate::keymap::{KeymapDef, KeymapId};
+use crate::settings::{Setting, SettingType, Value};
 use crate::syntax::Grammar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndentStyle {
     Spaces,
     Tabs,
+}
+
+impl IndentStyle {
+    /// The style an `indent` setting value names.
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "tabs" => IndentStyle::Tabs,
+            _ => IndentStyle::Spaces,
+        }
+    }
 }
 
 /// How a buffer indents when its mode leaves it open: the editor's `tab_width` and
@@ -45,10 +57,8 @@ pub type LineFace = Arc<dyn Fn(usize, &str) -> Option<FaceId> + Send + Sync>;
 pub struct Mode {
     pub name: String,
     pub comment_prefix: String,
-    /// Set only where the language dictates it (Makefiles use tabs); otherwise buffers
-    /// follow the editor's `tab_width` / `indent` settings.
-    pub tab_width: Option<usize>,
-    pub indent: Option<IndentStyle>,
+    /// Settings with their own value in this mode's buffers, by setting index.
+    settings: Vec<(u16, Value)>,
     pub read_only: bool,
     pub extensions: Vec<String>,
     /// Exact file names (case-insensitive), e.g. `Makefile`.
@@ -56,8 +66,8 @@ pub struct Mode {
     pub grammar: Option<GrammarLoader>,
     /// The mode's keymap, set by `Editor::define_mode`.
     pub keymap: Option<KeymapId>,
-    /// Name of a keymap the mode's keymap inherits unbound keys from.
-    pub parent_keymap: Option<String>,
+    /// What `define_mode` puts in the keymap; its name is the mode's.
+    pub(crate) keymap_def: KeymapDef,
     /// Name of the command `revert-buffer` runs in this mode instead of reloading from disk.
     pub revert: Option<String>,
     /// Name of the command that recreates a generated buffer of this mode when ted restarts
@@ -81,14 +91,13 @@ impl Mode {
         Self {
             name: name.to_string(),
             comment_prefix: "// ".to_string(),
-            tab_width: None,
-            indent: None,
+            settings: Vec::new(),
             read_only: false,
             extensions: Vec::new(),
             file_names: Vec::new(),
             grammar: None,
             keymap: None,
-            parent_keymap: None,
+            keymap_def: KeymapDef::default(),
             revert: None,
             restore: None,
             line_face: None,
@@ -104,14 +113,32 @@ impl Mode {
         self
     }
 
-    pub fn tab_width(mut self, width: usize) -> Self {
-        self.tab_width = Some(width);
+    /// Gives `setting` its own value in this mode's buffers, where the language dictates
+    /// one (Makefiles indent with tabs). It must be of the setting's type.
+    pub fn set<T: SettingType>(mut self, setting: Setting<T>, value: impl Into<Value>) -> Self {
+        self.set_value(setting.index(), value.into());
         self
     }
 
-    pub fn indent(mut self, style: IndentStyle) -> Self {
-        self.indent = Some(style);
-        self
+    pub(crate) fn set_value(&mut self, index: u16, value: Value) {
+        match self.settings.iter_mut().find(|(i, _)| *i == index) {
+            Some(slot) => slot.1 = value,
+            None => self.settings.push((index, value)),
+        }
+    }
+
+    /// This mode's own value of `setting`, if it has one.
+    pub fn get<T: SettingType>(&self, setting: Setting<T>) -> Option<T::Ref<'_>> {
+        self.value(setting.index()).map(T::read)
+    }
+
+    pub(crate) fn value(&self, index: u16) -> Option<&Value> {
+        self.settings.iter().find(|(i, _)| *i == index).map(|(_, v)| v)
+    }
+
+    /// The settings with their own value in this mode, by index.
+    pub(crate) fn settings(&self) -> &[(u16, Value)] {
+        &self.settings
     }
 
     pub fn read_only(mut self) -> Self {
@@ -134,20 +161,25 @@ impl Mode {
         self
     }
 
-    /// Keys the mode doesn't bind fall through to the keymap named `parent` (e.g. list
-    /// modes inherit `locations`).
-    pub fn parent_keymap(mut self, parent: &str) -> Self {
-        self.parent_keymap = Some(parent.to_string());
+    /// Binds each `(keys, command)` in the mode's keymap.
+    pub fn keys(mut self, table: &[(&str, &str)]) -> Self {
+        self.keymap_def = self.keymap_def.keys(table);
+        self
+    }
+
+    /// Shapes the rest of the mode's keymap: its parent, fallback and so on.
+    pub fn keymap(mut self, f: impl FnOnce(KeymapDef) -> KeymapDef) -> Self {
+        self.keymap_def = f(self.keymap_def);
         self
     }
 
     /// A generated read-only buffer's mode (a listing, log or help text): its keymap
     /// inherits `special`, where `h` shows the mode's keys, `n` / `p` step between rows,
-    /// `g` refreshes and `q` quits. A parent set with `parent_keymap` is kept (and should
-    /// itself inherit `special`).
+    /// `g` refreshes and `q` quits. A parent set with `keymap` is kept (and should itself
+    /// inherit `special`).
     pub fn special(mut self) -> Self {
         self.read_only = true;
-        self.parent_keymap.get_or_insert_with(|| "special".to_string());
+        self.keymap_def.parent.get_or_insert_with(|| "special".to_string());
         self
     }
 
@@ -227,40 +259,6 @@ fn same_name(a: &str, b: &str) -> bool {
             (None, None) => return true,
             (Some(x), Some(y)) if x.eq_ignore_ascii_case(y) => {}
             _ => return false,
-        }
-    }
-}
-
-/// User changes to a mode's settings (`mode(...)` in `init.rhai`).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ModeOverrides {
-    pub tab_width: Option<usize>,
-    pub indent: Option<IndentStyle>,
-    pub comment: Option<String>,
-    pub extensions: Option<Vec<String>>,
-    pub line_numbers: Option<bool>,
-    pub highlight_line: Option<bool>,
-}
-
-impl ModeOverrides {
-    pub fn apply(&self, mode: &mut Mode) {
-        if let Some(width) = self.tab_width {
-            mode.tab_width = Some(width);
-        }
-        if let Some(indent) = self.indent {
-            mode.indent = Some(indent);
-        }
-        if let Some(comment) = &self.comment {
-            mode.comment_prefix.clone_from(comment);
-        }
-        if let Some(extensions) = &self.extensions {
-            mode.extensions.clone_from(extensions);
-        }
-        if let Some(show) = self.line_numbers {
-            mode.line_numbers = show;
-        }
-        if let Some(highlight) = self.highlight_line {
-            mode.highlight_line = highlight;
         }
     }
 }

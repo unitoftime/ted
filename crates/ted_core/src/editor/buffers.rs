@@ -21,6 +21,14 @@ struct PendingSave {
     then: SaveDone,
 }
 
+/// Which generated buffer of a mode is meant: the editor's one, or the one working in a
+/// directory (a repository's status, a project's build).
+#[derive(Debug, Clone, Copy)]
+pub enum BufferScope<'a> {
+    Editor,
+    Dir(&'a Path),
+}
+
 /// Where killed file buffers were, restored when their file is visited again.
 #[derive(Default)]
 struct FilePlaces(HashMap<PathBuf, Place>);
@@ -46,17 +54,33 @@ impl Editor {
         self.add_buffer(buf)
     }
 
-    /// The generated (file-less) buffer in `mode`, created empty if needed, named `name`:
-    /// how output buffers like the build output or help are found again. They are found
-    /// by mode, so a name is only what the buffer shows (`xref: foo` names its query).
-    pub fn special_buffer(&mut self, name: &str, mode: &str) -> BufferId {
-        match self.buffers.find(|b| b.path().is_none() && b.mode().name == mode) {
-            Some(id) => {
-                self.buffers[id].set_name(name);
-                id
-            }
+    /// The generated (file-less) buffer of `mode` in `scope`, if there is one.
+    pub fn find_generated(&self, mode: &str, scope: BufferScope) -> Option<BufferId> {
+        self.buffers.find(|b| {
+            b.path().is_none()
+                && b.mode().name == mode
+                && match scope {
+                    BufferScope::Editor => true,
+                    BufferScope::Dir(dir) => b.directory() == dir,
+                }
+        })
+    }
+
+    /// The generated buffer of `mode` in `scope`, created empty if needed (working in the
+    /// scope's directory), and named `name`. Output buffers such as the build output, help
+    /// or git status are found again by what they are, so the name is only what the buffer
+    /// shows (`xref: foo` names its query).
+    pub fn generated_buffer(&mut self, name: &str, mode: &str, scope: BufferScope) -> BufferId {
+        let id = match self.find_generated(mode, scope) {
+            Some(id) => id,
             None => self.new_buffer(name, mode),
+        };
+        let buf = &mut self.buffers[id];
+        buf.set_name(name);
+        if let BufferScope::Dir(dir) = scope {
+            buf.set_directory(dir);
         }
+        id
     }
 
     /// Switches buffer `id` to the mode named `mode`. Returns false if there is none.
@@ -97,7 +121,7 @@ impl Editor {
             buffer.set_place(place);
         }
         let id = self.add_buffer(buffer);
-        self.run_buffer_hooks(|h| &h.buffer_opened, id);
+        self.file_visited(id);
         Ok(id)
     }
 
@@ -181,11 +205,20 @@ impl Editor {
     /// Writes `id` to `path`, which it visits from then on (picking up that path's mode).
     /// Unlike `save_buffer`, this runs no `before_save` hooks.
     pub fn save_buffer_as(&mut self, id: BufferId, path: &Path) -> io::Result<()> {
+        let visits = self.buffers[id].path() != Some(path);
         self.buffers[id].save_as(path)?;
         let mode = self.modes.for_path(Some(path));
         self.buffers[id].set_mode(mode);
+        if visits {
+            self.file_visited(id);
+        }
         self.finish_save(id);
         Ok(())
+    }
+
+    /// Runs the `file_visited` hooks: buffer `id` now visits a file it didn't before.
+    pub(crate) fn file_visited(&mut self, id: BufferId) {
+        self.run_buffer_hooks(|h| &h.file_visited, id);
     }
 
     fn finish_save(&mut self, id: BufferId) {

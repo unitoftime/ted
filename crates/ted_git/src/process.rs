@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use ted_core::{Editor, FaceId, StyledText};
 
-use crate::git::{git, git_output, GitOutput};
+use ted_core::process::Output;
+
+use crate::git::{git, git_output};
 use crate::{diff, status};
 use crate::{generated_buffer, GitFaces};
 
@@ -59,7 +61,7 @@ pub fn query(
     });
 }
 
-fn log(ed: &mut Editor, root: &Path, label: &str, output: &GitOutput) {
+fn log(ed: &mut Editor, root: &Path, label: &str, output: &Output) {
     let faces = *ed.ext_mut::<GitFaces>();
     let mut text = StyledText::new();
     text.line(&[(&format!("$ {}", label), Some(if output.ok { faces.section } else { FaceId::ERROR }))]);

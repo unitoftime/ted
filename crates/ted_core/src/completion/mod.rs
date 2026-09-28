@@ -12,7 +12,6 @@
 mod popup;
 mod words;
 
-use std::rc::Rc;
 use std::time::Duration;
 
 use crate::buffer::{Buffer, BufferId, Edit};
@@ -133,7 +132,7 @@ pub(crate) fn register(ed: &mut Editor) {
     });
     popup::register(ed);
     chain::register(ed, 0, WordsBackend);
-    ed.hooks.post_command.push(Rc::new(auto_complete));
+    ed.hooks.on_post_command(auto_complete);
 }
 
 /// Asks the backends for completions of the word before point.

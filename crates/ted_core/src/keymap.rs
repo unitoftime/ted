@@ -27,21 +27,22 @@ enum Node {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeymapId(u16);
 
-/// Keymaps every editor has, in id order: (name, parent, opaque).
-const BUILTIN: &[(&str, Option<KeymapId>, bool)] = &[
-    ("global", None, false),
-    ("input", None, true),
-    ("minibuffer", Some(KeymapId::INPUT), false),
-    ("search", Some(KeymapId::INPUT), false),
-    ("picker", Some(KeymapId::INPUT), false),
-    ("choice", None, true),
-    ("menu", None, true),
-    ("undo-tree", None, true),
-    ("jump", None, true),
-    ("special", None, false),
-    ("completion", None, true),
-    ("tooltip", None, true),
-    ("file-search", Some(KeymapId::PICKER), false),
+/// Keymaps every editor has, in id order, so modals can name theirs with a constant. What
+/// they contain is defined like any other keymap (`commands::bindings`).
+const BUILTIN: &[&str] = &[
+    "global",
+    "input",
+    "minibuffer",
+    "search",
+    "picker",
+    "choice",
+    "menu",
+    "undo-tree",
+    "jump",
+    "special",
+    "completion",
+    "tooltip",
+    "file-search",
 ];
 
 impl KeymapId {
@@ -66,23 +67,84 @@ impl KeymapId {
     pub const FILE_SEARCH: KeymapId = KeymapId(12);
 }
 
+/// A keymap as `Editor::define_keymap` installs it: plain data naming commands, resolved
+/// (and checked, since defaults are part of the program) when installed.
+///
+/// ```ignore
+/// ed.define_keymap(KeymapDef::new("lsp").keys(&[("C-c !", "lsp-diagnostics")]));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct KeymapDef {
+    pub(crate) name: String,
+    pub(crate) parent: Option<String>,
+    pub(crate) opaque: bool,
+    pub(crate) self_insert: Option<String>,
+    pub(crate) fallback: Option<String>,
+    pub(crate) fallback_exempt: Vec<String>,
+    pub(crate) keys: Vec<(String, String)>,
+}
+
+impl KeymapDef {
+    pub fn new(name: &str) -> Self {
+        Self { name: name.to_string(), ..Self::default() }
+    }
+
+    /// Keys this map doesn't bind are looked up in the keymap named `parent`.
+    pub fn parent(mut self, parent: &str) -> Self {
+        self.parent = Some(parent.to_string());
+        self
+    }
+
+    /// Stops the layer search here, so keys nothing binds are swallowed instead of reaching
+    /// the buffer underneath (every modal).
+    pub fn opaque(mut self) -> Self {
+        self.opaque = true;
+        self
+    }
+
+    /// Runs `command` with `Arg::Char` for printable keys nothing in the map binds.
+    pub fn self_insert(mut self, command: &str) -> Self {
+        self.self_insert = Some(command.to_string());
+        self
+    }
+
+    /// Runs `command` with `Arg::Key` for every single key the map leaves unbound,
+    /// printable or not (printable keys go to a `self_insert` in the chain first): a
+    /// terminal passing keys to its program, search ending on keys it doesn't use.
+    /// Multi-key sequences that turn out unbound are replayed to it key by key.
+    pub fn fallback(mut self, command: &str) -> Self {
+        self.fallback = Some(command.to_string());
+        self
+    }
+
+    /// Keys the fallback doesn't take, so lower layers handle them (a terminal lets `C-x`
+    /// and `M-x` reach the editor's global bindings).
+    pub fn fallback_exempt(mut self, keys: &[&str]) -> Self {
+        self.fallback_exempt.extend(keys.iter().map(|k| k.to_string()));
+        self
+    }
+
+    /// Binds each `(keys, command)`; a command may carry an argument (`"describe-prefix C-x"`).
+    pub fn keys(mut self, table: &[(&str, &str)]) -> Self {
+        self.keys.extend(table.iter().map(|(keys, command)| (keys.to_string(), command.to_string())));
+        self
+    }
+
+    pub fn bind(mut self, keys: impl Into<String>, command: impl Into<String>) -> Self {
+        self.keys.push((keys.into(), command.into()));
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct Keymap {
     pub name: String,
     root: HashMap<Key, Node>,
-    pub parent: Option<KeymapId>,
-    /// Invoked with `Arg::Char` for printable keys that nothing in this map binds.
-    pub self_insert: Option<CommandId>,
-    /// Stop the layer search here instead of falling through to lower layers.
-    pub opaque: bool,
-    /// Receives (as `Arg::Key`) every single key this map leaves unbound, printable or not
-    /// (printable keys go to a `self_insert` in the chain first). Used for raw passthrough,
-    /// e.g. a terminal sending keys to its program, and for search ending on keys it doesn't
-    /// use. Multi-key sequences that turn out unbound are replayed to it key by key.
-    pub fallback: Option<CommandId>,
-    /// Keys the fallback doesn't take, so lower layers handle them (a terminal lets `C-x`
-    /// and `M-x` reach the editor's global bindings).
-    pub fallback_exempt: Vec<Key>,
+    pub(crate) parent: Option<KeymapId>,
+    pub(crate) self_insert: Option<CommandId>,
+    pub(crate) opaque: bool,
+    pub(crate) fallback: Option<CommandId>,
+    pub(crate) fallback_exempt: Vec<Key>,
 }
 
 enum Lookup<'a> {
@@ -198,12 +260,9 @@ pub struct Keymaps {
 impl Default for Keymaps {
     fn default() -> Self {
         let mut keymaps = Self { maps: Vec::new(), by_name: HashMap::new() };
-        for (i, &(name, parent, opaque)) in BUILTIN.iter().enumerate() {
+        for (i, name) in BUILTIN.iter().enumerate() {
             let id = keymaps.ensure(name);
             debug_assert_eq!(id, KeymapId(i as u16));
-            let map = keymaps.get_mut(id);
-            map.parent = parent;
-            map.opaque = opaque;
         }
         keymaps
     }
@@ -211,7 +270,7 @@ impl Default for Keymaps {
 
 impl Keymaps {
     /// Returns the keymap named `name`, creating it if needed.
-    pub fn ensure(&mut self, name: &str) -> KeymapId {
+    pub(crate) fn ensure(&mut self, name: &str) -> KeymapId {
         if let Some(&id) = self.by_name.get(name) {
             return id;
         }
@@ -229,7 +288,7 @@ impl Keymaps {
         &self.maps[id.0 as usize]
     }
 
-    pub fn get_mut(&mut self, id: KeymapId) -> &mut Keymap {
+    pub(crate) fn get_mut(&mut self, id: KeymapId) -> &mut Keymap {
         &mut self.maps[id.0 as usize]
     }
 

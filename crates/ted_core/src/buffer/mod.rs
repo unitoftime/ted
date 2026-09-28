@@ -31,6 +31,7 @@ use crate::ext::Extensions;
 use crate::keymap::KeymapId;
 use crate::mode::{IndentStyle, Indentation, Mode};
 use crate::project::Project;
+use crate::settings;
 use crate::syntax::{Parsed, Syntax, SyntaxToken};
 use crate::text::directory_of;
 use crate::view::BufferRenderer;
@@ -52,7 +53,8 @@ pub struct Buffer {
     /// Working directory of a buffer without a file, set by whatever generated it.
     directory: Option<PathBuf>,
     mode: Arc<Mode>,
-    /// The editor's indentation, used where the mode sets none (kept current by `Buffers`).
+    /// The editor's indentation settings, used where the mode has none of its own (kept
+    /// current by `Buffers`).
     default_indentation: Indentation,
     read_only: bool,
     history: UndoTree,
@@ -224,11 +226,17 @@ impl Buffer {
     }
 
     pub fn tab_width(&self) -> usize {
-        self.mode.tab_width.unwrap_or(self.default_indentation.width)
+        match self.mode.get(settings::TAB_WIDTH) {
+            Some(width) => width.clamp(1, 16) as usize,
+            None => self.default_indentation.width,
+        }
     }
 
     pub fn indent_style(&self) -> IndentStyle {
-        self.mode.indent.unwrap_or(self.default_indentation.style)
+        match self.mode.get(settings::INDENT) {
+            Some(style) => IndentStyle::from_setting(style),
+            None => self.default_indentation.style,
+        }
     }
 
     pub fn is_read_only(&self) -> bool {
@@ -742,7 +750,7 @@ impl Buffers {
         id
     }
 
-    /// Changes the indentation of every buffer whose mode doesn't set its own.
+    /// Changes the indentation of every buffer whose mode has none of its own.
     pub(crate) fn set_indentation(&mut self, indentation: Indentation) {
         self.indentation = indentation;
         for buffer in self.map.values_mut() {

@@ -2,7 +2,6 @@
 //! emulator's events into UI-thread work.
 
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +15,7 @@ use alacritty_terminal::term::{self, Term};
 use alacritty_terminal::tty;
 use ted_core::jobs::{JobContext, JobHandle};
 use ted_core::kill_ring::KillMode;
+use ted_core::process::Program;
 use ted_core::{BufferId, Editor};
 
 use crate::palette::Palette;
@@ -157,13 +157,8 @@ pub fn session(ed: &mut Editor, id: BufferId) -> Option<&mut Session> {
 }
 
 impl Session {
-    /// Starts the user's shell in `dir`, reporting to terminal buffer `buffer`.
-    pub fn spawn(
-        ed: &Editor,
-        buffer: BufferId,
-        dir: &Path,
-        shell: Option<(String, Vec<String>)>,
-    ) -> std::io::Result<Session> {
+    /// Starts `shell` (see `shell`) on a new terminal, reporting to terminal buffer `buffer`.
+    pub fn spawn(ed: &Editor, buffer: BufferId, shell: &Program) -> std::io::Result<Session> {
         let size = TermSize { cols: 80, lines: 24 };
         let (job, ctx) = ed.job_context();
         let writer = Arc::new(OnceLock::new());
@@ -172,15 +167,11 @@ impl Session {
 
         let config = term::Config { kitty_keyboard: true, ..Default::default() };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
-        let env = HashMap::from([
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("COLORTERM".to_string(), "truecolor".to_string()),
-        ]);
         let options = tty::Options {
             shell: Some(without_flow_control(shell)),
-            working_directory: Some(dir.to_path_buf()),
+            working_directory: Some(shell.dir.clone()),
             drain_on_exit: true,
-            env,
+            env: shell.env.iter().cloned().collect(),
         };
         let pty = tty::new(&options, size.window_size((0.0, 0.0)), buffer_window_id(buffer))?;
         let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
@@ -206,11 +197,17 @@ impl Session {
 /// Wraps the shell so it starts with XON/XOFF flow control off: otherwise `C-s` freezes
 /// all output until `C-q`, and Emacs habits hit `C-s` constantly. With it off, `C-s`
 /// reaches the program (bash's forward history search).
-fn without_flow_control(shell: Option<(String, Vec<String>)>) -> tty::Shell {
+/// What a new terminal runs in `dir`: `shell`, else the user's login shell.
+pub fn shell(shell: Option<(String, Vec<String>)>, dir: &Path) -> Program {
     let (program, args) =
         shell.unwrap_or_else(|| (std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()), Vec::new()));
-    let mut wrapped = vec!["-c".to_string(), "stty -ixon 2>/dev/null; exec \"$0\" \"$@\"".to_string(), program];
-    wrapped.extend(args);
+    Program::new(program, dir).args(args).env("TERM", "xterm-256color").env("COLORTERM", "truecolor")
+}
+
+fn without_flow_control(shell: &Program) -> tty::Shell {
+    let flow_control_off = "stty -ixon 2>/dev/null; exec \"$0\" \"$@\"".to_string();
+    let mut wrapped = vec!["-c".to_string(), flow_control_off, shell.program.clone()];
+    wrapped.extend(shell.args.iter().cloned());
     tty::Shell::new("/bin/sh".to_string(), wrapped)
 }
 

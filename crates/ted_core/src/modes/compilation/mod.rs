@@ -8,23 +8,22 @@
 //! UI thread only appends finished batches of text, decorations and entries.
 
 mod parse;
-mod process;
 
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Instant;
 
-use crate::buffer::{Buffer, BufferId, Decoration, StyledText};
-use crate::editor::Editor;
+use crate::buffer::{BufferId, Decoration, StyledText};
+use crate::editor::{BufferScope, Editor};
 use crate::face::FaceId;
 use crate::jobs::{JobContext, JobHandle};
 use crate::locations::{self, LocationList, Severity};
+use crate::process::{self, Merged, Program};
 use crate::settings::Setting;
 use crate::text::collapse_tilde;
 
 use parse::{Batch, OutputParser};
-use process::Process;
 
 pub const BUFFER_NAME: &str = "compilation";
 pub const MODE: &str = "Compilation";
@@ -70,7 +69,7 @@ pub fn register(ed: &mut Editor) {
         run(ed, command, dir);
     });
     c.register("kill-compilation", "Stop the running build", |ed, _| {
-        let Some(id) = ed.buffers.find(is_compilation) else {
+        let Some(id) = ed.find_generated(MODE, BufferScope::Editor) else {
             ed.set_status("No compilation");
             return;
         };
@@ -84,17 +83,12 @@ pub fn register(ed: &mut Editor) {
         }
     });
 
-    ed.define_mode(locations::list_mode(MODE).revert("recompile"));
-    ed.bind_all("compilation", &[("C-c C-k", "kill-compilation")]);
-}
-
-fn is_compilation(buf: &Buffer) -> bool {
-    buf.path().is_none() && buf.mode().name == MODE
+    ed.define_mode(locations::list_mode(MODE).revert("recompile").keys(&[("C-c C-k", "kill-compilation")]));
 }
 
 /// The last build's command and directory, else the configured command at the project root.
 fn last_run(ed: &Editor, default_command: Setting<String>) -> (String, PathBuf) {
-    let last = ed.buffers.find(is_compilation).and_then(|id| ed.buffers[id].local::<Compilation>());
+    let last = ed.find_generated(MODE, BufferScope::Editor).and_then(|id| ed.buffers[id].local::<Compilation>());
     match last.filter(|state| !state.command.is_empty()) {
         Some(state) => (state.command.clone(), state.dir.clone()),
         None => (ed.settings.get(default_command).to_string(), ed.project().root),
@@ -103,7 +97,7 @@ fn last_run(ed: &Editor, default_command: Setting<String>) -> (String, PathBuf) 
 
 /// Starts `command` in `dir`, replacing any running build and the previous output.
 fn run(ed: &mut Editor, command: String, dir: PathBuf) {
-    let id = ed.special_buffer(BUFFER_NAME, MODE);
+    let id = ed.generated_buffer(BUFFER_NAME, MODE, BufferScope::Editor);
     stop(ed, id);
 
     let mut header = StyledText::new();
@@ -122,7 +116,7 @@ fn run(ed: &mut Editor, command: String, dir: PathBuf) {
     }
     locations::set_current(ed, id);
 
-    let run = match process::spawn(&command, &dir) {
+    let run = match Program::shell(&command, &dir).env("TERM", "dumb").spawn_merged() {
         Ok(process) => {
             let pid = process.child.id();
             let job_dir = dir.clone();
@@ -145,13 +139,13 @@ fn run(ed: &mut Editor, command: String, dir: PathBuf) {
 fn stop(ed: &mut Editor, id: BufferId) -> Option<Run> {
     let run = ed.buffers[id].local_mut::<Compilation>().run.take()?;
     run.job.cancel();
-    process::terminate(run.pid);
+    process::terminate_group(run.pid);
     Some(run)
 }
 
 /// Job thread: parses output as it arrives and sends it on in batches, one per read, so
 /// a chatty build costs the UI a few appends rather than one per line.
-fn stream(ctx: &JobContext, id: BufferId, mut process: Process, dir: PathBuf) {
+fn stream(ctx: &JobContext, id: BufferId, mut process: Merged, dir: PathBuf) {
     let mut parser = OutputParser::new(dir);
     let mut chunk = vec![0; 64 * 1024];
     loop {

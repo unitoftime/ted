@@ -29,7 +29,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use ted_core::kill_ring::KillMode;
-use ted_core::{Arg, BufferId, Editor, Key, Mode, Plugin};
+use ted_core::{Arg, BufferId, Editor, KeymapDef, Mode, Plugin};
 
 use crate::render::TermRenderer;
 use crate::session::{session, Session, TermBuffer};
@@ -69,8 +69,8 @@ fn open(ed: &mut Editor) {
     let dir = ed.active_buffer().directory();
     let id = ed.new_buffer(unique_name(ed), TERMINAL_MODE);
     ed.buffers[id].set_directory(&dir);
-    let shell = ed.ext::<ShellCommand>().and_then(|s| s.0.clone());
-    match Session::spawn(ed, id, &dir, shell) {
+    let shell = session::shell(ed.ext::<ShellCommand>().and_then(|s| s.0.clone()), &dir);
+    match Session::spawn(ed, id, &shell) {
         Ok(session) => {
             let renderer = TermRenderer { handle: session.handle.clone() };
             let buf = &mut ed.buffers[id];
@@ -274,41 +274,43 @@ impl Plugin for TermPlugin {
             wheel(ed, arg.int().unwrap_or(1) as usize, false)
         });
 
-        let terminal_map = ed.define_mode(Mode::new(TERMINAL_MODE).read_only().restore("term"));
+        ed.define_mode(
+            Mode::new(TERMINAL_MODE)
+                .read_only()
+                .restore("term")
+                // The editor keeps its C-x commands and M-x; unbound C-x sequences still
+                // reach the program. Other editor keys are bound in the `terminal` keymap
+                // (from `init.rhai`), since bindings there win over passing the key through.
+                .keymap(|k| k.fallback("term-send-key").fallback_exempt(&["C-x", "M-x"]))
+                .keys(&[
+                    ("C-]", "term-view-mode"),
+                    ("C-S-v", "term-paste"),
+                    ("C-y", "term-paste"),
+                    ("M-w", "term-copy"),
+                    ("C-S-c", "term-copy"),
+                    ("<mouse-1>", "term-mouse-select"),
+                    ("<double-mouse-1>", "term-mouse-select-line"),
+                    ("<drag-mouse-1>", "term-mouse-drag"),
+                    ("<wheel-up>", "term-wheel-up"),
+                    ("<wheel-down>", "term-wheel-down"),
+                ]),
+        );
         // Looks like the live terminal, so switching modes doesn't move anything.
         ed.define_mode(
-            Mode::new(VIEW_MODE).read_only().restore("term").face(term_face).line_numbers(false).highlight_line(false),
+            Mode::new(VIEW_MODE)
+                .read_only()
+                .restore("term")
+                .face(term_face)
+                .line_numbers(false)
+                .highlight_line(false)
+                .keys(&[("C-]", "term-terminal-mode"), ("q", "term-terminal-mode")]),
         );
-        let send_key = ed.commands.id("term-send-key");
-        let map = ed.keymaps.get_mut(terminal_map);
-        map.fallback = send_key;
-        // The editor keeps its C-x commands and M-x; unbound C-x sequences still reach the
-        // program. Other editor keys are bound in the `terminal` keymap (from `init.rhai`),
-        // since bindings there win over passing the key through.
-        map.fallback_exempt = ["C-x", "M-x"].iter().map(|k| Key::parse(k).expect("valid key")).collect();
+        ed.define_keymap(KeymapDef::new("global").keys(&[("C-x t", "term")]));
 
-        ed.bind_all("global", &[("C-x t", "term")]);
-        ed.bind_all(
-            "terminal",
-            &[
-                ("C-]", "term-view-mode"),
-                ("C-S-v", "term-paste"),
-                ("C-y", "term-paste"),
-                ("M-w", "term-copy"),
-                ("C-S-c", "term-copy"),
-                ("<mouse-1>", "term-mouse-select"),
-                ("<double-mouse-1>", "term-mouse-select-line"),
-                ("<drag-mouse-1>", "term-mouse-drag"),
-                ("<wheel-up>", "term-wheel-up"),
-                ("<wheel-down>", "term-wheel-down"),
-            ],
-        );
-        ed.bind_all("terminal-view", &[("C-]", "term-terminal-mode"), ("q", "term-terminal-mode")]);
-
-        ed.hooks.buffer_killed.push(std::rc::Rc::new(|ed, id| {
+        ed.hooks.on_buffer_killed(|ed, id| {
             if let Some(session) = session(ed, id) {
                 session.shutdown();
             }
-        }));
+        });
     }
 }

@@ -12,13 +12,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use crate::editor::Editor;
+use crate::process::Program;
 use crate::text::directory_of;
 
 /// Files listed per project at most.
@@ -66,14 +65,13 @@ impl Project {
     }
 
     fn git_files(&self) -> Option<Vec<PathBuf>> {
-        let output = Command::new("git")
+        let listing = Program::new("git", &self.root)
             .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-            .current_dir(&self.root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())?;
-        let names = output.stdout.split(|&b| b == 0).filter(|name| !name.is_empty());
-        Some(names.take(MAX_FILES).map(|name| PathBuf::from(String::from_utf8_lossy(name).as_ref())).collect())
+            .output(None)
+            .into_result()
+            .ok()?;
+        let names = listing.split('\0').filter(|name| !name.is_empty());
+        Some(names.take(MAX_FILES).map(PathBuf::from).collect())
     }
 
     fn walk_files(&self) -> Vec<PathBuf> {
@@ -140,11 +138,11 @@ impl FileLists {
 
 pub(crate) fn register(ed: &mut Editor) {
     // So the first file switcher in a repository opens with its files.
-    ed.hooks.buffer_opened.push(Rc::new(|ed, id| {
+    ed.hooks.on_file_visited(|ed, id| {
         let project = ed.buffers[id].project();
         if project.is_git() {
             let lists = ed.file_lists();
             lists.warm(ed, &project);
         }
-    }));
+    });
 }

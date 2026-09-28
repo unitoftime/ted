@@ -1,9 +1,9 @@
 //! Which server runs for which mode, where its project root is, and what it is told.
 //!
-//! Each language's command is a setting, `lsp.server.<language>`, so `init.rhai` can point
-//! it elsewhere (`set("lsp.server.python", "pyright-langserver --stdio")`) or turn it off
-//! with an empty string. What the server is told is `lsp.settings.<language>`, e.g.
-//! `set("lsp.settings.go", #{ staticcheck: true })`.
+//! A server's command is its mode's `lsp.server` setting, so `init.rhai` can point it
+//! elsewhere (`mode("python", #{ "lsp.server": "pyright-langserver --stdio" })`) or turn it
+//! off with an empty string. What the server is told is the mode's `lsp.settings`, e.g.
+//! `mode("go", #{ "lsp.settings": #{ staticcheck: true } })`.
 
 use std::path::{Path, PathBuf};
 
@@ -11,10 +11,11 @@ use serde_json::Value as Json;
 use ted_core::{Map, Project, Value};
 
 pub struct ServerSpec {
-    /// Names the `lsp.server.<language>` setting.
+    /// The language's identifier in the protocol.
     pub language: &'static str,
     /// The ted mode whose buffers it serves.
     pub mode: &'static str,
+    /// The mode's default `lsp.server`.
     pub command: &'static str,
     /// Files marking a project root; the outermost one inside the repository wins, so a
     /// workspace shares one server.
@@ -48,7 +49,7 @@ pub const SERVERS: &[ServerSpec] = &[
     },
 ];
 
-/// A server's configuration (`lsp.settings.<language>`) as JSON; none is null.
+/// A server's configuration (its mode's `lsp.settings`) as JSON; none is null.
 pub fn config_json(config: &Map) -> Json {
     if config.is_empty() {
         return Json::Null;

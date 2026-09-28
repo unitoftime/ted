@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use ted_core::jobs::JobHandle;
 use ted_core::rows::{self, RowSpec, RowText};
-use ted_core::{BufferId, Editor, FaceId};
+use ted_core::{BufferId, BufferScope, Editor, FaceId};
 
 use crate::changes::{self, Action, Command, Fold, Line};
 use crate::diff::{self, Source};
@@ -85,7 +85,7 @@ impl StatusBuffer {
 }
 
 pub fn find_buffer(ed: &Editor, root: &Path) -> Option<BufferId> {
-    ed.buffers.find(|b| b.local::<StatusBuffer>().is_some() && b.directory() == root)
+    ed.find_generated(MODE, BufferScope::Dir(root))
 }
 
 /// Opens (or reuses) the status buffer for `root` in the active window and refreshes it.

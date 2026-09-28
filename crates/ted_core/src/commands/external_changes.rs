@@ -5,7 +5,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use crate::buffer::BufferId;
 use crate::editor::Editor;
@@ -25,21 +24,18 @@ struct ExternalChanges {
 pub(crate) fn register(ed: &mut Editor) {
     let watcher = Watcher::new(ed, on_change);
     ed.ext_mut::<ExternalChanges>().watcher = Some(watcher);
-    // Saving can give the buffer a new file.
-    ed.hooks.buffer_opened.push(Rc::new(track));
-    ed.hooks.buffer_saved.push(Rc::new(track));
-    ed.hooks.buffer_killed.push(Rc::new(|ed, id| watch_file(ed, id, None)));
+    ed.hooks.on_file_visited(track);
+    ed.hooks.on_buffer_killed(|ed, id| watch_file(ed, id, None));
     // Buffers held back by their own edits are handled once they become active or clean.
-    ed.hooks.post_command.push(Rc::new(|ed| {
+    ed.hooks.on_post_command(|ed| {
         if !ed.ext_mut::<ExternalChanges>().pending.is_empty() {
             resolve(ed);
         }
-    }));
+    });
 }
 
-/// Watches the file buffer `id` visits. Opening and saving do this; call it after
-/// pointing a buffer at another file some other way.
-pub fn track(ed: &mut Editor, id: BufferId) {
+/// Watches the file buffer `id` visits.
+fn track(ed: &mut Editor, id: BufferId) {
     let file = ed.buffers.get(id).and_then(|b| b.path()).filter(|p| !p.is_dir());
     // Through symlinks, since the change happens where the file really is.
     let file = file.map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));

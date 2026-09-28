@@ -8,7 +8,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{entry_at_point, focus_entry, listed_dir, refresh_all, Dired};
-use crate::commands::external_changes;
 use crate::commands::files::{anchor_directory, complete_path};
 use crate::editor::Editor;
 use crate::rows::{self, Rows};
@@ -216,7 +215,7 @@ fn follow_move(ed: &mut Editor, from: &Path, to: &Path) {
         moved_ids.push(id);
     }
     for id in moved_ids {
-        external_changes::track(ed, id);
+        ed.file_visited(id);
     }
 }
 

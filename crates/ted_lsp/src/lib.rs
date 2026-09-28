@@ -14,10 +14,11 @@
 //! - reports diagnostics, underlined in the buffer and listed by `lsp-diagnostics`
 //!   (`C-c !`).
 //!
-//! Settings (`init.rhai`): `lsp.enabled`, `lsp.diagnostics`, and per language
-//! `lsp.server.<language>` (the server's command line, empty to disable it) and
-//! `lsp.settings.<language>` (a map sent as the server's configuration). `M-x lsp-restart`
-//! restarts the active buffer's server, picking up changed settings.
+//! Settings (`init.rhai`): `lsp.enabled`, `lsp.diagnostics`, `lsp.server` (the server's
+//! command line, empty for none) and `lsp.settings` (a map sent as the server's
+//! configuration). Servers are per mode, so the last two are set in one:
+//! `mode("go", #{ "lsp.settings": #{ staticcheck: true } })`. `M-x lsp-restart` restarts
+//! the active buffer's server, picking up changed settings.
 
 mod client;
 mod completion;
@@ -30,12 +31,11 @@ mod servers;
 mod transport;
 mod xref;
 
-use std::rc::Rc;
 use std::time::Duration;
 
-use ted_core::{chain, Editor, KeymapId, Map, Plugin, Setting};
+use ted_core::{chain, Editor, KeymapDef, KeymapId, Map, Plugin, Setting};
 
-use crate::servers::{ServerSpec, SERVERS};
+use crate::servers::SERVERS;
 
 /// How often edited documents are considered for syncing; text that held still for one
 /// tick is sent.
@@ -47,24 +47,12 @@ pub struct LspPlugin;
 pub(crate) struct Handles {
     pub enabled: Setting<bool>,
     pub diagnostics: Setting<bool>,
-    /// Each language's server settings, in `SERVERS` order.
-    servers: Vec<ServerSettings>,
+    /// The command line starting a mode's server.
+    pub server: Setting<String>,
+    /// A mode's server configuration: initialization options and `workspace/configuration`.
+    pub config: Setting<Map>,
     /// Keys of buffers attached to a server (a minor keymap).
     pub keymap: KeymapId,
-}
-
-pub(crate) struct ServerSettings {
-    /// The command line starting the server.
-    pub command: Setting<String>,
-    /// The server's configuration: initialization options and `workspace/configuration`.
-    pub config: Setting<Map>,
-}
-
-impl Handles {
-    pub fn server(&self, spec: &ServerSpec) -> &ServerSettings {
-        let index = SERVERS.iter().position(|s| s.language == spec.language).expect("specs come from SERVERS");
-        &self.servers[index]
-    }
 }
 
 pub(crate) fn handles(ed: &Editor) -> &Handles {
@@ -77,47 +65,35 @@ impl Plugin for LspPlugin {
     }
 
     fn init(&mut self, ed: &mut Editor) {
-        let s = &mut ed.settings;
-        let handles = Handles {
-            enabled: s.define("lsp.enabled", true, "Start language servers for files that have one"),
-            diagnostics: s.define("lsp.diagnostics", true, "Show language server errors and warnings in buffers"),
-            servers: SERVERS
-                .iter()
-                .map(|spec| ServerSettings {
-                    command: s.define(
-                        &format!("lsp.server.{}", spec.language),
-                        spec.command,
-                        &format!("Command line of the {} language server (empty disables it)", spec.language),
-                    ),
-                    config: s.define(
-                        &format!("lsp.settings.{}", spec.language),
-                        Map::new(),
-                        &format!(
-                            "Configuration sent to the {} language server, under '{}'",
-                            spec.language, spec.section
-                        ),
-                    ),
-                })
-                .collect(),
-            keymap: ed.keymaps.ensure("lsp"),
-        };
-        ed.watch_setting(handles.diagnostics, diagnostics::refresh_all);
-        ed.set_ext(handles);
-
         diagnostics::register(ed);
         hover::register(ed);
         rename::register(ed);
         ed.commands.register("lsp-restart", "Restart the language server of this buffer", |ed, _| {
             client::restart(ed);
         });
-        ed.hooks.buffer_opened.push(Rc::new(client::attach));
-        ed.hooks.buffer_saved.push(Rc::new(client::did_save));
-        ed.hooks.buffer_killed.push(Rc::new(client::detach));
-        ed.hooks.post_command.push(Rc::new(diagnostics::echo));
+
+        let s = &mut ed.settings;
+        let handles = Handles {
+            enabled: s.define("lsp.enabled", true, "Start language servers for files that have one"),
+            diagnostics: s.define("lsp.diagnostics", true, "Show language server errors and warnings in buffers"),
+            server: s.define::<String>("lsp.server", "", "Command line of the mode's language server (empty for none)"),
+            config: s.define("lsp.settings", Map::new(), "Configuration sent to the mode's language server"),
+            keymap: ed
+                .define_keymap(KeymapDef::new("lsp").keys(&[("C-c !", "lsp-diagnostics"), ("C-c .", "lsp-hover")])),
+        };
+        for spec in SERVERS {
+            ed.set_mode_setting(spec.mode, "lsp.server", &spec.command.into()).expect("servers are for built-in modes");
+        }
+        ed.watch_setting(handles.diagnostics, diagnostics::refresh_all);
+        ed.set_ext(handles);
+
+        ed.hooks.on_file_visited(client::file_visited);
+        ed.hooks.on_buffer_saved(client::did_save);
+        ed.hooks.on_buffer_killed(client::detach);
+        ed.hooks.on_post_command(diagnostics::echo);
         ed.add_timer(SYNC_TICK, client::sync_idle);
         chain::register(ed, 100, xref::LspBackend);
         chain::register(ed, 100, completion::LspBackend);
         chain::register(ed, 100, format::LspBackend);
-        ed.bind_all("lsp", &[("C-c !", "lsp-diagnostics"), ("C-c .", "lsp-hover")]);
     }
 }

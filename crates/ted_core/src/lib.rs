@@ -8,11 +8,13 @@
 //!   over its mode's keymap over the global keymap.
 //! - Modals (prompts, pickers, custom UIs) sit on a stack and take callbacks.
 //! - Everything drawn is styled through named `Face`s; themes override faces by name.
-//! - Settings are named, typed and documented, like commands and faces.
+//! - Settings are named, typed and documented, like commands and faces; a mode can give
+//!   any setting its own value for its buffers.
 //! - Buffers carry decorations (styled ranges that track edits) and typed local state.
 //! - Slow work runs as background jobs that send closures back to the UI thread.
 //! - Definitions, completion and formatting ask chains of backends (`chain`): language
 //!   servers first, built-in fallbacks after.
+//! - Outside programs start through `process::Program`.
 //! - Plugins extend all of the above through `Editor`; users rebind via `init.rhai`.
 
 pub mod brackets;
@@ -40,6 +42,7 @@ pub mod locations;
 pub mod mode;
 pub mod modes;
 pub mod plugin;
+pub mod process;
 pub mod project;
 pub mod recentf;
 pub mod rows;
@@ -57,16 +60,16 @@ pub use buffer::{Buffer, BufferId, Buffers, Decoration, Edit, Margin, Place, Sty
 pub use command::{Arg, CommandId, Commands};
 pub use config::ConfigOp;
 pub use doc::Doc;
-pub use editor::{Editor, StartupOptions};
+pub use editor::{BufferScope, Editor, StartupOptions};
 pub use face::{Face, FaceId, Faces};
 pub use frame::{Color, Frame, Metrics, Rect, Style};
 pub use jobs::{JobContext, JobHandle};
 pub use key::{Key, KeyCode, KeyEvent, Modifiers};
-pub use keymap::{Binding, Keymap, KeymapId, Keymaps};
+pub use keymap::{Binding, Keymap, KeymapDef, KeymapId, Keymaps};
 pub use kill_ring::KillRing;
 pub use layout::{Layout, SplitType, Tile};
 pub use locations::{Location, LocationList, Severity};
-pub use mode::{IndentStyle, Indentation, Mode, ModeOverrides, ModeRegistry};
+pub use mode::{IndentStyle, Indentation, Mode, ModeRegistry};
 pub use plugin::{Hooks, Plugin, SaveToken};
 pub use project::Project;
 pub use recentf::RecentFiles;

@@ -24,15 +24,16 @@ ted_gui ──┼──> ted_lsp ──┼──> ted_core
 | View | A window onto a buffer: cursor, scroll, wrapping. Showing a buffer starts at its place. Views are the leaves of the split `Layout`. |
 | Doc | A view and its buffer borrowed together. Motion and editing primitives live here. |
 | Command | Every user-facing action is a named command, whether built in or from a plugin. |
-| Keymap | A trie of key sequences to commands. Keymaps have parents and stack in layers. |
-| Mode | Per-language or per-buffer-kind data (grammar, indentation, comments) plus its own keymap. |
+| Keymap | A trie of key sequences to commands. Keymaps have parents and stack in layers. Every keymap, built in or from a plugin, is declared the same way, as data (`KeymapDef`). |
+| Mode | Per-language or per-buffer-kind data (grammar, comments, file matching) plus its own keymap and its own values of any settings. |
 | Modal | Anything that takes over the keyboard for a moment: prompts, pickers, search, menus. |
-| Setting / Face | Named, typed, documented values and named styles. Themes and `init.rhai` override them by name. |
+| Setting / Face | Named, typed, documented values and named styles. Themes and `init.rhai` override them by name; a setting can also be set per mode. |
 | Job | Background work on a thread that sends results back to the UI thread as closures. |
 
 Generated buffers (git status, directory listings, compilation output, search results) are
-ordinary read-only buffers written from styled text. Their lines can map back to the items
-they show, so the same navigation keys work in all of them.
+ordinary read-only buffers written from styled text, found again by mode and scope (the
+editor, or a directory such as a repository). Their lines can map back to the items they
+show, so the same navigation keys work in all of them.
 
 ## Input
 
@@ -59,14 +60,18 @@ runs through `Editor::spawn` and reports back with `ctx.send(|ed| ...)`. The fro
 wakes up, runs the queued closures and redraws. Jobs can be cancelled; their late results
 are dropped.
 
+Every outside program (builds, git, language servers, terminals) is described as a
+`process::Program` and started there, which is where running them on another host fits in.
+
 ## Extending
 
 - **Configuration** is `~/.config/ted/init.rhai`, a [Rhai](https://rhai.rs) script that
-  sets settings, faces and mode options and binds keys. `M-x reload-init` reapplies it
-  from the defaults.
-- **Plugins** are Rust types implementing `plugin::Plugin`. They register commands, modes,
-  settings, faces and hooks through the same registries the built-ins use. See the
-  example at the top of `crates/ted_core/src/plugin.rs`.
+  sets settings (globally or per mode), faces and mode options and binds keys in any
+  keymap. `M-x reload-init` reapplies it from the defaults. Mistakes are reported with
+  their line, and the rest still applies.
+- **Plugins** are Rust types implementing `plugin::Plugin`. They register commands, modes
+  (with their keys), keymaps, settings, faces and hooks through the same registries the
+  built-ins use. See the example at the top of `crates/ted_core/src/plugin.rs`.
 
 The built-in modes (`modes/dired`, `modes/compilation`, `modes/markdown.rs`) are written
 the same way as plugins.

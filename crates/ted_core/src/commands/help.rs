@@ -8,10 +8,10 @@ use std::collections::HashSet;
 
 use crate::buffer::StyledText;
 use crate::command::{Arg, CommandId};
-use crate::editor::Editor;
+use crate::editor::{BufferScope, Editor};
 use crate::face::FaceId;
 use crate::key::{format_seq, Key};
-use crate::keymap::{Binding, KeymapId, Resolved};
+use crate::keymap::{Binding, KeymapDef, KeymapId, Resolved};
 use crate::mode::Mode;
 use crate::settings::Value;
 use crate::ui::{Menu, Modal, PickerItem};
@@ -58,8 +58,7 @@ pub fn register(ed: &mut Editor) {
         ed.push_modal(DescribeKey { keymap, layers, keys: Vec::new() });
         ed.set_status("Describe key: ");
     });
-    let input =
-        c.register_hidden("describe-key-input", "Read the next key of the sequence to describe", describe_key_input);
+    c.register_hidden("describe-key-input", "Read the next key of the sequence to describe", describe_key_input);
     c.register("describe-bindings", "List every key binding active in this buffer, by keymap", |ed, _| {
         describe_bindings(ed);
     });
@@ -95,16 +94,24 @@ pub fn register(ed: &mut Editor) {
         ed.reload_init();
     });
 
-    let describe_key_map = ed.keymaps.ensure(DESCRIBE_KEY_MAP);
-    let map = ed.keymaps.get_mut(describe_key_map);
-    map.fallback = Some(input);
-    map.opaque = true;
+    ed.define_keymap(KeymapDef::new(DESCRIBE_KEY_MAP).opaque().fallback("describe-key-input"));
     ed.define_mode(Mode::new("Help").special());
+}
+
+/// Lists `errors` from `source` (a config file) in the `help` buffer.
+pub fn show_errors(ed: &mut Editor, source: &str, errors: &[String]) {
+    let mut text = StyledText::new();
+    text.line(&[(&format!("{} errors in {}", errors.len(), source), Some(FaceId::ERROR))]);
+    text.line(&[]);
+    for error in errors {
+        text.line(&[("  ", None), (error, None)]);
+    }
+    show_help(ed, text);
 }
 
 /// Shows `text` in the `help` buffer, from the top.
 pub fn show_help(ed: &mut Editor, text: StyledText) {
-    let id = ed.special_buffer(HELP_BUFFER, "Help");
+    let id = ed.generated_buffer(HELP_BUFFER, "Help", BufferScope::Editor);
     ed.buffers[id].set_styled("help", text);
     ed.show_buffer(id);
     for view in ed.layout.views_showing(id) {
@@ -221,7 +228,7 @@ fn pick_setting(ed: &mut Editor, id: &str, title: &str, then: impl FnOnce(&mut E
 }
 
 fn describe_setting(ed: &mut Editor, name: String) {
-    let Some(entry) = ed.settings.entry(&name) else { return };
+    let Some((index, entry)) = ed.settings.entry_index(&name) else { return };
     let mut text = StyledText::new();
     text.line(&[
         (&entry.name, Some(FaceId::FUNCTION)),
@@ -233,9 +240,20 @@ fn describe_setting(ed: &mut Editor, name: String) {
     text.line(&[]);
     text.line(&[("  Type:    ", Some(FaceId::SHADOW)), (&entry.expected(), None)]);
     text.line(&[("  Default: ", Some(FaceId::SHADOW)), (&entry.default.to_string(), None)]);
+    let in_modes: Vec<(String, String)> =
+        ed.modes.iter().filter_map(|mode| Some((mode.keymap_name(), mode.value(index)?.to_string()))).collect();
+    if !in_modes.is_empty() {
+        text.line(&[]);
+        text.line(&[("  In modes:", Some(FaceId::SHADOW))]);
+        for (mode, value) in &in_modes {
+            text.line(&[("    ", None), (&format!("{:<16}", mode), Some(FaceId::TYPE)), (value, None)]);
+        }
+    }
     text.line(&[]);
     heading(&mut text, "Change it in init.rhai (or for this session with M-x set-setting)");
     snippet(&mut text, &format!("set({:?}, {});", entry.name, entry.value));
+    let mode = ed.active_buffer().mode().keymap_name();
+    snippet(&mut text, &format!("mode({:?}, #{{ {:?}: {} }});", mode, entry.name, entry.value));
     show_help(ed, text);
 }
 
@@ -279,10 +297,7 @@ fn describe_bindings(ed: &mut Editor) {
         }
         text.line(&[]);
     }
-    heading(
-        &mut text,
-        "Rebind in init.rhai: bind(keys, command) for global, bind_mode(keymap, keys, command) otherwise",
-    );
+    heading(&mut text, "Rebind in init.rhai: bind(keys, command) for global, bind(keymap, keys, command) otherwise");
     show_help(ed, text);
 }
 
@@ -297,14 +312,14 @@ fn snippet(text: &mut StyledText, line: &str) {
 fn bind_line(keymap: &str, keys: &str, spec: &str) -> String {
     match keymap {
         "global" => format!("bind({:?}, {:?});", keys, spec),
-        _ => format!("bind_mode({:?}, {:?}, {:?});", keymap, keys, spec),
+        _ => format!("bind({:?}, {:?}, {:?});", keymap, keys, spec),
     }
 }
 
 fn unbind_line(keymap: &str, keys: &str) -> String {
     match keymap {
         "global" => format!("unbind({:?});", keys),
-        _ => format!("unbind_mode({:?}, {:?});", keymap, keys),
+        _ => format!("unbind({:?}, {:?});", keymap, keys),
     }
 }
 

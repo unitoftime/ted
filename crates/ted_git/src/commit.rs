@@ -16,13 +16,19 @@ const HELP: &str =
     "# Write the commit message above. Lines starting with '#' are ignored.\n# C-c C-c to commit, C-c C-k to cancel.\n";
 
 pub fn mode() -> Mode {
-    Mode::new(MODE).comment("# ").grammar(ted_core::syntax::markdown).line_face(|line, text| {
-        if text.starts_with('#') {
-            Some(FaceId::COMMENT)
-        } else {
-            (line == 0).then_some(FaceId::HEADING)
-        }
-    })
+    Mode::new(MODE)
+        .comment("# ")
+        .grammar(ted_core::syntax::markdown)
+        .line_face(
+            |line, text| {
+                if text.starts_with('#') {
+                    Some(FaceId::COMMENT)
+                } else {
+                    (line == 0).then_some(FaceId::HEADING)
+                }
+            },
+        )
+        .keys(&[("C-c C-c", "git-commit-finish"), ("C-c C-k", "git-commit-cancel")])
 }
 
 /// Buffer-local marker: this buffer's message amends the last commit.

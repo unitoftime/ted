@@ -6,7 +6,6 @@
 //! already formatted, which doesn't pass the query on.
 
 use std::ops::Range;
-use std::rc::Rc;
 
 use crate::buffer::{BufferId, Edit};
 use crate::chain::{self, Request};
@@ -84,14 +83,14 @@ pub(crate) fn register(ed: &mut Editor) {
             ask(ed, buffer, range, None);
         },
     );
-    ed.hooks.before_save.push(Rc::new(|ed, buffer, save| {
-        let on_save = ed.ext::<Settings>().is_some_and(|s| ed.settings.get(s.on_save));
+    ed.hooks.on_before_save(|ed, buffer, save| {
+        let on_save = ed.ext::<Settings>().is_some_and(|s| ed.settings.get_in(s.on_save, ed.buffers[buffer].mode()));
         if on_save {
             ask(ed, buffer, None, Some(save));
         } else {
             save.done(ed);
         }
-    }));
+    });
 }
 
 fn ask(ed: &mut Editor, buffer: BufferId, range: Option<Range<usize>>, save: Option<SaveToken>) {

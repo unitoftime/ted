@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use ropey::Rope;
 use serde_json::{json, Value};
 use ted_core::completion::TriggerChars;
+use ted_core::process::Program;
 use ted_core::text::collapse_tilde;
 use ted_core::{BufferId, Edit, Editor};
 
@@ -69,13 +70,15 @@ impl Capabilities {
 
 pub struct Client {
     pub spec: &'static ServerSpec,
+    /// The program running it, for messages.
+    name: String,
     pub root: PathBuf,
     pub encoding: Encoding,
     capabilities: Capabilities,
     /// Characters after which the server offers completions (`.`, `:`).
     triggers: Vec<char>,
-    /// The configuration it started with (`lsp.settings.<language>`), sent again once
-    /// it is initialized.
+    /// The configuration it started with (its mode's `lsp.settings`), sent again once it
+    /// is initialized.
     config: Value,
     transport: Option<Transport>,
     state: State,
@@ -99,7 +102,7 @@ impl Client {
     }
 
     fn name(&self) -> &str {
-        self.spec.command
+        &self.name
     }
 }
 
@@ -153,31 +156,43 @@ pub fn encoding_for(ed: &Editor, path: &Path) -> Option<Encoding> {
     lsp.docs.get(&id).map(|doc| lsp.clients[doc.server].encoding)
 }
 
+/// Buffer `id` visits a new file: closes it on the server it had, and opens it with the
+/// new file's.
+pub fn file_visited(ed: &mut Editor, id: BufferId) {
+    detach(ed, id);
+    attach(ed, id);
+}
+
 /// Opens buffer `id` with its language's server, starting the server if needed.
 pub fn attach(ed: &mut Editor, id: BufferId) {
-    if !ed.settings.get(handles(ed).enabled) || ed.ext::<Lsp>().is_some_and(|l| l.docs.contains_key(&id)) {
+    if ed.ext::<Lsp>().is_some_and(|l| l.docs.contains_key(&id)) {
         return;
     }
     let Some(buf) = ed.buffers.get(id) else {
         return;
     };
-    let Some(spec) = ServerSpec::for_mode(&buf.mode().name) else {
+    let (settings, lsp, mode) = (&ed.settings, handles(ed), buf.mode());
+    if !settings.get_in(lsp.enabled, mode) {
+        return;
+    }
+    let Some(spec) = ServerSpec::for_mode(&mode.name) else {
         return;
     };
     let Some(path) = buf.path().filter(|p| !p.is_dir()).map(Path::to_path_buf) else {
         return;
     };
-    let command = ed.settings.get(handles(ed).server(spec).command).to_string();
+    let command = settings.get_in(lsp.server, mode).to_string();
     if command.trim().is_empty() {
         return;
     }
+    let config = config_json(settings.get_in(lsp.config, mode));
     let root = spec.root_for(&path);
     let lsp = ed.ext_mut::<Lsp>();
     let existing = lsp.clients.iter().position(|c| c.is_live() && c.spec.language == spec.language && c.root == root);
     let server = match existing {
         Some(server) => server,
         None if lsp.failed.contains(&(spec.language, root.clone())) => return,
-        None => match start(ed, spec, &command, &root) {
+        None => match start(ed, spec, &command, config, &root) {
             Ok(server) => server,
             Err(e) => {
                 ed.ext_mut::<Lsp>().failed.insert((spec.language, root));
@@ -393,23 +408,30 @@ fn stop(ed: &mut Editor, server: ServerId) {
     }
 }
 
-fn start(ed: &mut Editor, spec: &'static ServerSpec, command: &str, root: &Path) -> Result<ServerId, String> {
+fn start(
+    ed: &mut Editor,
+    spec: &'static ServerSpec,
+    command: &str,
+    config: Value,
+    root: &Path,
+) -> Result<ServerId, String> {
     let server = ed.ext_mut::<Lsp>().clients.len();
-    let argv: Vec<&str> = command.split_whitespace().collect();
+    let mut argv = command.split_whitespace();
+    let program = Program::new(argv.next().ok_or("empty server command")?, root).args(argv);
     let root_uri = path_to_uri(root);
-    let config = config_json(ed.settings.get(handles(ed).server(spec).config));
     let context = ServerContext {
         section: spec.section,
         settings: config.clone(),
         root_uri: root_uri.clone(),
         root_name: root.file_name().map_or_else(String::new, |n| n.to_string_lossy().to_string()),
     };
-    let transport = Transport::spawn(&argv, root, server, ed.job_context(), context)
-        .map_err(|e| format!("'{}': {}", command, e))?;
+    let transport =
+        Transport::spawn(&program, server, ed.job_context(), context).map_err(|e| format!("'{}': {}", command, e))?;
     let _ = transport.tx.send(Outgoing::request(0, "initialize", initialize_params(root, &root_uri, config.clone())));
 
     let mut client = Client {
         spec,
+        name: program.program,
         root: root.to_path_buf(),
         encoding: Encoding::Utf16,
         capabilities: Capabilities::default(),
@@ -421,8 +443,9 @@ fn start(ed: &mut Editor, spec: &'static ServerSpec, command: &str, root: &Path)
         pending: HashMap::new(),
     };
     client.pending.insert(0, Box::new(move |ed, result| initialized(ed, server, result)));
+    let status = format!("Starting {} in {}", client.name, collapse_tilde(root));
     ed.ext_mut::<Lsp>().clients.push(client);
-    ed.set_status(format!("Starting {} in {}", argv.first().unwrap_or(&command), collapse_tilde(root)));
+    ed.set_status(status);
     Ok(server)
 }
 

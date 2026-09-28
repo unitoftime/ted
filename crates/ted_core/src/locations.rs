@@ -19,10 +19,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::buffer::{Buffer, BufferId};
-use crate::editor::Editor;
+use crate::editor::{BufferScope, Editor};
 use crate::face::FaceId;
 use crate::mode::Mode;
 use crate::rows::{self, RowSpec, RowText, Rows};
+use crate::settings::TAB_WIDTH;
 use crate::text::{highlight_runs, short_paths, trim_highlighted};
 
 /// The mode (and keymap) of generated location lists.
@@ -146,7 +147,7 @@ pub struct ListItem {
 /// A read-only list mode named `name` whose keymap extends the list keys, for
 /// `Editor::define_mode`.
 pub fn list_mode(name: &str) -> Mode {
-    Mode::new(name).tab_width(8).parent_keymap(KEYMAP).special()
+    Mode::new(name).set(TAB_WIDTH, 8).keymap(|k| k.parent(KEYMAP)).special()
 }
 
 /// Writes `items` into the list buffer of mode `mode`, named `name`, after `header`,
@@ -184,7 +185,7 @@ pub fn fill_list(ed: &mut Editor, name: &str, mode: &str, header: &str, items: &
         let spec = row_spec((&loc.path, loc.line, loc.col, &item.text), item.severity).point_at(prefix);
         text.row(spec, &parts);
     }
-    let id = ed.special_buffer(name, mode);
+    let id = ed.generated_buffer(name, mode, BufferScope::Editor);
     text.install_fresh(ed, id, "locations");
     let targets =
         order.iter().map(|item| Target { severity: item.severity, location: item.location.clone() }).collect();
@@ -218,8 +219,11 @@ pub(crate) fn register(ed: &mut Editor) {
         step_here(ed, false);
     });
 
-    ed.define_mode(Mode::new(MODE).tab_width(8).special());
-    ed.bind_all(KEYMAP, &[("RET", "goto-location"), ("n", "next-location"), ("p", "previous-location")]);
+    ed.define_mode(Mode::new(MODE).set(TAB_WIDTH, 8).special().keys(&[
+        ("RET", "goto-location"),
+        ("n", "next-location"),
+        ("p", "previous-location"),
+    ]));
 }
 
 /// `next-error` / `previous-error`: steps from the current entry and visits the result.

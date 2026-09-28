@@ -17,36 +17,42 @@
 //!             let _ = ed.open_file(ted_core::expand_tilde(path));
 //!         });
 //!         ed.commands.register("todo-list", "List open tasks", |ed, _| {
-//!             let id = ed.special_buffer("todo list", "Todo List");
+//!             let id = ed.generated_buffer("todo list", "Todo List", BufferScope::Editor);
 //!             let mut text = StyledText::new();
 //!             text.line(&[("Open tasks", Some(FaceId::HEADING))]);
 //!             ed.buffers[id].set_styled("todo", text);
 //!             ed.show_buffer(id);
 //!         });
 //!         // Special: read-only, with `h` (help), `n` / `p`, `g` (revert) and `q` (quit).
-//!         ed.define_mode(Mode::new("Todo List").special().revert("todo-list"));
+//!         ed.define_mode(Mode::new("Todo List").special().revert("todo-list").keys(&[("RET", "todo-open")]));
 //!         // No global key: `C-c <key>` is the user's (`bind("C-c o", "todo-open")`).
 //!     }
 //! }
 //! ```
 //!
 //! - `ed.commands.register(name, doc, |ed, arg| ..)` adds commands.
-//! - `ed.define_mode(Mode::new(..))` adds a major mode and its keymap (named after the mode);
-//!   `ed.bind_all(keymap, table)` binds defaults, which `init.rhai` can override. Global
-//!   `C-c <key>` is left to the user (see `commands::bindings`).
+//! - `ed.define_mode(Mode::new(..).keys(..))` adds a major mode and its keymap (named
+//!   after the mode). `ed.define_keymap(KeymapDef::new(..))` defines any other keymap, or
+//!   adds to one (`"global"`). Either way the bindings are defaults `init.rhai` can
+//!   override; global `C-c <key>` is left to the user (see `commands::bindings`).
 //! - `ed.settings.define(name, default, doc)` declares settings; keep the handle and read
-//!   with `ed.settings.get(handle)`; `ed.watch_setting` reacts to changes.
+//!   with `ed.settings.get(handle)`, or `get_in(handle, buf.mode())` for a buffer, since
+//!   any setting can have its own value in a mode (`Mode::set`, `ed.set_mode_setting`).
+//!   `ed.watch_setting` reacts to changes.
 //! - `ed.faces.register(name, default)` declares faces themes can restyle.
-//! - `ed.special_buffer` / `ed.new_buffer` make generated buffers; `StyledText` builds
-//!   their content, `rows::RowText` when lines stand for items (point and marks then stay
-//!   on their items across refreshes); `buffer.enable_keymap` layers a minor keymap on one
-//!   buffer.
-//! - `ed.hooks` subscribes to buffer and command events; `before_save` hooks can change a
-//!   buffer before it is written (formatting) and hold the save until they are done.
+//! - `ed.generated_buffer(name, mode, scope)` makes (or finds again) an output buffer, one
+//!   per editor or per directory; `StyledText` builds its content, `rows::RowText` when
+//!   lines stand for items (point and marks then stay on their items across refreshes);
+//!   `buffer.enable_keymap` layers a minor keymap on one buffer.
+//! - `ed.hooks.on_*` subscribes to buffer and command events; `before_save` hooks can
+//!   change a buffer before it is written (formatting) and hold the save until they are
+//!   done.
 //! - `ed.ext_mut::<T>()` / `ed.set_ext(..)` / `buffer.local_mut::<T>()` store plugin state
 //!   per editor or buffer; `ed.set_chain` / `ed.last_chain` pass state to the next command.
 //! - `ed.prompt / confirm / pick / push_modal` and `ui::Menu` / `ui::Tooltip` for UI;
 //!   `ed.spawn` for background work, `ed.after` to run something later.
+//! - `process::Program` starts outside programs (git, servers, builds), so where programs
+//!   run is decided in one place.
 //! - `chain::register(ed, priority, backend)` answers definitions and references,
 //!   completions or formatting for the buffers a plugin knows about (a language server).
 //! - `ed.apply_edits` changes a buffer in many places as one undo step.
@@ -80,15 +86,39 @@ impl SaveToken {
     }
 }
 
+/// Code plugins run on editor events, registered with the `on_*` methods.
 #[derive(Default, Clone)]
 pub struct Hooks {
-    /// A buffer was created from a file or directory.
-    pub buffer_opened: Vec<BufferHook>,
-    /// In order, before a buffer is written by `Editor::save_buffer`.
-    pub before_save: Vec<SaveHook>,
-    pub buffer_saved: Vec<BufferHook>,
+    pub(crate) file_visited: Vec<BufferHook>,
+    pub(crate) before_save: Vec<SaveHook>,
+    pub(crate) buffer_saved: Vec<BufferHook>,
+    pub(crate) buffer_killed: Vec<BufferHook>,
+    pub(crate) post_command: Vec<EditorHook>,
+}
+
+impl Hooks {
+    /// A buffer started visiting a file or directory: it was opened, saved under a new
+    /// name, or its file was renamed.
+    pub fn on_file_visited(&mut self, hook: impl Fn(&mut Editor, BufferId) + 'static) {
+        self.file_visited.push(Rc::new(hook));
+    }
+
+    /// Runs in order before a buffer is written by `Editor::save_buffer`; see `SaveHook`.
+    pub fn on_before_save(&mut self, hook: impl Fn(&mut Editor, BufferId, SaveToken) + 'static) {
+        self.before_save.push(Rc::new(hook));
+    }
+
+    pub fn on_buffer_saved(&mut self, hook: impl Fn(&mut Editor, BufferId) + 'static) {
+        self.buffer_saved.push(Rc::new(hook));
+    }
+
     /// Runs before the buffer is removed.
-    pub buffer_killed: Vec<BufferHook>,
-    /// After every command dispatched from a key or M-x.
-    pub post_command: Vec<EditorHook>,
+    pub fn on_buffer_killed(&mut self, hook: impl Fn(&mut Editor, BufferId) + 'static) {
+        self.buffer_killed.push(Rc::new(hook));
+    }
+
+    /// Runs after every command dispatched from a key or M-x.
+    pub fn on_post_command(&mut self, hook: impl Fn(&mut Editor) + 'static) {
+        self.post_command.push(Rc::new(hook));
+    }
 }

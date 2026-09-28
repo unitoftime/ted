@@ -128,7 +128,7 @@ fn test_language_mode_comments() {
     assert_eq!(mode("README.md").comment_prefix, "<!-- ");
     assert_eq!(mode("Makefile").name, "Makefile");
     assert_eq!(mode("Makefile").comment_prefix, "# ");
-    assert_eq!(mode("Makefile").tab_width, Some(8));
+    assert_eq!(mode("Makefile").get(ted_core::settings::TAB_WIDTH), Some(8));
     assert_eq!(Buffer::from_str("# Header").mode().name, "Plain Text");
 
     // Comment and uncomment the current line
@@ -173,7 +173,7 @@ impl Plugin for GreeterPlugin {
             ed.set_status(format!("Hello #{}", count));
         });
         editor.bind("global", "C-F", "greeter-hello").unwrap();
-        editor.hooks.buffer_saved.push(std::rc::Rc::new(|ed, _| ed.set_status("greeter saw a save")));
+        editor.hooks.on_buffer_saved(|ed, _| ed.set_status("greeter saw a save"));
     }
 }
 
@@ -194,25 +194,26 @@ fn test_plugin_commands_bindings_and_state() {
 
 #[test]
 fn test_init_script_rebinds_keys_and_sets_options() {
-    let ops = ted_core::config::run_script(
+    let script = ted_core::config::run_script(
         r##"
         set("wrap_lines", false);
         set("tab_width", 3);
         set("compile.command", "cargo build");
-        mode("rust", #{ tab_width: 2, indent: "tabs" });
-        bind("C-c z", "split-window-right");
+        mode("rust", #{ tab_width: 2, indent: "tabs", format_on_save: true });
+        bind(["C-c z", "C-c C-z"], "split-window-right");
         bind("C-c 9", "restore-window-layout 2");
         unbind("C-o");
-        bind_mode("markdown", "C-c C-t", "toggle-theme");
+        bind("markdown", "C-c C-t", "toggle-theme");
         face("keyword", #{ fg: "#ff0000", bold: true });
         "##,
-    )
-    .unwrap();
+    );
     let mut editor = Editor::new(&[]);
-    assert!(editor.apply_config(&ops).is_empty());
+    assert!(editor.apply_config(&script).is_empty());
     assert!(!editor.active_view().wrap);
     assert_eq!(editor.settings.entry("compile.command").unwrap().value, ted_core::Value::from("cargo build"));
-    assert_eq!(editor.modes.get("Rust").unwrap().tab_width, Some(2));
+    let rust = editor.modes.get("Rust").unwrap();
+    assert_eq!(rust.get(ted_core::settings::TAB_WIDTH), Some(2));
+    assert_eq!(rust.get(ted_core::settings::INDENT), Some("tabs"));
     assert_eq!(editor.active_buffer().tab_width(), 3, "modes without a width follow tab_width");
     assert_eq!(editor.faces.fg(FaceId::KEYWORD), Color::rgb(255, 0, 0));
     editor.execute("toggle-theme");
@@ -225,8 +226,9 @@ fn test_init_script_rebinds_keys_and_sets_options() {
     editor.handle_key(ctrl('o'));
     assert_eq!(text(&editor), "ab", "Unbound keys do nothing");
 
-    let errors = editor.apply_config(&ted_core::config::run_script(r#"bind("C-c q", "no-such-command");"#).unwrap());
-    assert_eq!(errors.len(), 1);
+    let errors = editor
+        .apply_config(&ted_core::config::run_script("set(\"tab_width\", 2);\nbind(\"C-c q\", \"no-such-command\");"));
+    assert_eq!(errors, ["line 2: Unknown command 'no-such-command'"]);
 }
 
 #[test]

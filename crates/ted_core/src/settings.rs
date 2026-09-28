@@ -4,12 +4,18 @@
 //! keep the returned handle. Reading through a handle is an index plus a type-checked match.
 //! `init.rhai` and `M-x set-setting` change settings by name, and `Editor::watch_setting`
 //! runs code when one changes (the theme reapplies faces, `wrap_lines` rewraps windows).
+//!
+//! Any setting can also have a value in a mode, which its buffers use instead: a mode
+//! definition sets the language's own (`Mode::set`, e.g. tabs in Makefiles), and
+//! `init.rhai` the user's (`mode("go", #{ format_on_save: true })`). Code reading a
+//! setting on behalf of a buffer uses `Settings::get_in` with the buffer's mode.
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::editor::Editor;
+use crate::mode::Mode;
 
 /// Named values of a map setting, e.g. a language server's configuration.
 pub type Map = BTreeMap<String, Value>;
@@ -200,6 +206,10 @@ impl<T> Setting<T> {
     const fn at(index: u16) -> Self {
         Self { index, _type: PhantomData }
     }
+
+    pub(crate) fn index(self) -> u16 {
+        self.index
+    }
 }
 
 pub struct Entry {
@@ -265,8 +275,8 @@ builtin_settings! {
     CURSOR_SHAPE: String = "cursor_shape", "box", &["box", "line", "underline"], "Shape of the text cursor";
     CURSOR_WIDTH: f64 = "cursor_width", 2.0, &[], "Width of the line cursor in pixels";
     SPLIT_SEPARATOR_SIZE: f64 = "split_separator_size", 2.0, &[], "Width of the divider between windows";
-    TAB_WIDTH: i64 = "tab_width", 4_i64, &[], "Indentation width, for modes that don't set their own";
-    INDENT: String = "indent", "spaces", &["spaces", "tabs"], "What indenting inserts, for modes that don't choose";
+    TAB_WIDTH: i64 = "tab_width", 4_i64, &[], "Indentation width (from 1 to 16)";
+    INDENT: String = "indent", "spaces", &["spaces", "tabs"], "What indenting inserts";
 }
 
 impl Default for Settings {
@@ -313,12 +323,36 @@ impl Settings {
         T::read(&self.entries[setting.index as usize].value)
     }
 
+    /// The value of `setting` in buffers of `mode`: the mode's own if it has one.
+    pub fn get_in<'a, T: SettingType>(&'a self, setting: Setting<T>, mode: &'a Mode) -> T::Ref<'a> {
+        match mode.value(setting.index) {
+            Some(value) => T::read(value),
+            None => self.get(setting),
+        }
+    }
+
     fn index(&self, name: &str) -> Option<usize> {
         self.entries.iter().position(|e| e.name == name)
     }
 
+    /// Checks `value` for setting `name`, returning the setting's index and the value as
+    /// stored (an integer given for a number becomes one).
+    pub(crate) fn accept(&self, name: &str, value: &Value) -> Result<(u16, Value), String> {
+        let index = self.index(name).ok_or_else(|| format!("Unknown setting '{}'", name))?;
+        Ok((index as u16, self.entries[index].accept(value)?))
+    }
+
+    pub(crate) fn name(&self, index: u16) -> &str {
+        &self.entries[index as usize].name
+    }
+
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         self.entries.get(self.index(name)?)
+    }
+
+    pub(crate) fn entry_index(&self, name: &str) -> Option<(u16, &Entry)> {
+        let index = self.index(name)?;
+        Some((index as u16, &self.entries[index]))
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
@@ -328,23 +362,22 @@ impl Settings {
     /// Sets `name` without running watchers; `Editor::set_setting` is the usual way in.
     /// Returns the setting's index when the value was accepted.
     pub(crate) fn set(&mut self, name: &str, value: &Value) -> Result<u16, String> {
-        let index = self.index(name).ok_or_else(|| format!("Unknown setting '{}'", name))?;
-        let entry = &mut self.entries[index];
-        entry.value = entry.accept(value)?;
-        Ok(index as u16)
+        let (index, value) = self.accept(name, value)?;
+        self.entries[index as usize].value = value;
+        Ok(index)
     }
 
     pub(crate) fn values(&self) -> Vec<Value> {
         self.entries.iter().map(|e| e.value.clone()).collect()
     }
 
-    /// Restores values saved by `values`, returning the names of the settings that changed.
-    pub(crate) fn restore(&mut self, values: &[Value]) -> Vec<String> {
+    /// Restores values saved by `values`, returning the indices of the settings that changed.
+    pub(crate) fn restore(&mut self, values: &[Value]) -> Vec<u16> {
         let mut changed = Vec::new();
-        for (entry, value) in self.entries.iter_mut().zip(values) {
+        for (index, (entry, value)) in self.entries.iter_mut().zip(values).enumerate() {
             if entry.value != *value {
                 entry.value = value.clone();
-                changed.push(entry.name.clone());
+                changed.push(index as u16);
             }
         }
         changed
@@ -367,10 +400,16 @@ impl Editor {
         }
     }
 
-    pub(crate) fn run_setting_watchers_by_name(&mut self, name: &str) {
-        if let Some(index) = self.settings.index(name) {
-            self.run_setting_watchers(index as u16);
-        }
+    /// Changes setting `name` in buffers of mode `mode` only, and runs its watchers. A
+    /// plugin calling this from `init` sets the mode's default, as `Mode::set` does.
+    pub fn set_mode_setting(&mut self, mode: &str, name: &str, value: &Value) -> Result<(), String> {
+        let (index, value) = self.settings.accept(name, value)?;
+        self.update_mode(mode, |mode| {
+            mode.set_value(index, value);
+            Ok(())
+        })?;
+        self.run_setting_watchers(index);
+        Ok(())
     }
 
     /// Runs `f` whenever `setting` changes.

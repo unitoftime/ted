@@ -168,23 +168,20 @@ pub fn register(ed: &mut Editor) {
             .help_group("Visit", &["dired-open", "dired-up", "row-next", "row-previous", "revert-buffer"])
             .help_group("Files", &["dired-copy", "dired-rename", "dired-delete", "dired-create-directory"])
             .help_group("Marks", &["row-mark", "row-unmark", "row-unmark-all"])
-            .help_group("View", &["dired-toggle-hidden", "dired-toggle-details"]),
-    );
-    ed.bind_all(
-        "dired",
-        &[
-            ("RET", "dired-open"),
-            ("q", "dired-up"),
-            (".", "dired-toggle-hidden"),
-            ("(", "dired-toggle-details"),
-            ("m", "row-mark"),
-            ("u", "row-unmark"),
-            ("U", "row-unmark-all"),
-            ("D", "dired-delete"),
-            ("R", "dired-rename"),
-            ("C", "dired-copy"),
-            ("+", "dired-create-directory"),
-        ],
+            .help_group("View", &["dired-toggle-hidden", "dired-toggle-details"])
+            .keys(&[
+                ("RET", "dired-open"),
+                ("q", "dired-up"),
+                (".", "dired-toggle-hidden"),
+                ("(", "dired-toggle-details"),
+                ("m", "row-mark"),
+                ("u", "row-unmark"),
+                ("U", "row-unmark-all"),
+                ("D", "dired-delete"),
+                ("R", "dired-rename"),
+                ("C", "dired-copy"),
+                ("+", "dired-create-directory"),
+            ]),
     );
 }
 
@@ -396,7 +393,8 @@ impl Columns {
                 *width = (*width).max(cell.chars().count());
             }
         }
-        let name_col = Self::INDENT.len() + widths.iter().filter(|&&w| w > 0).map(|w| w + Self::GAP.len()).sum::<usize>();
+        let name_col =
+            Self::INDENT.len() + widths.iter().filter(|&&w| w > 0).map(|w| w + Self::GAP.len()).sum::<usize>();
         Self { cells, widths, name_col }
     }
 

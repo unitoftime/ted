@@ -6,18 +6,19 @@ pub mod dired;
 pub mod markdown;
 
 use crate::editor::Editor;
-use crate::mode::{IndentStyle, Mode};
+use crate::mode::Mode;
+use crate::settings::{INDENT, TAB_WIDTH};
 use crate::syntax;
 
 pub(crate) fn register_builtin(ed: &mut Editor) {
     let modes = [
-        Mode::new("Rust").comment("// ").tab_width(4).extensions(&["rs"]).grammar(syntax::rust),
-        Mode::new("Go").comment("// ").indent(IndentStyle::Tabs).extensions(&["go"]).grammar(syntax::go),
+        Mode::new("Rust").comment("// ").set(TAB_WIDTH, 4).extensions(&["rs"]).grammar(syntax::rust),
+        Mode::new("Go").comment("// ").set(INDENT, "tabs").extensions(&["go"]).grammar(syntax::go),
         Mode::new("C/C++").comment("// ").extensions(&["c", "h", "cpp", "hpp", "cc", "cxx"]).grammar(syntax::c),
         Mode::new("JavaScript").extensions(&["js", "jsx", "mjs", "cjs"]).grammar(syntax::javascript),
         Mode::new("TypeScript").extensions(&["ts", "mts", "cts"]).grammar(syntax::typescript),
         Mode::new("TSX").extensions(&["tsx"]).grammar(syntax::tsx),
-        Mode::new("Python").comment("# ").tab_width(4).extensions(&["py"]).grammar(syntax::python),
+        Mode::new("Python").comment("# ").set(TAB_WIDTH, 4).extensions(&["py"]).grammar(syntax::python),
         Mode::new("JSON").extensions(&["json", "jsonc"]).grammar(syntax::json),
         Mode::new("TOML").comment("# ").extensions(&["toml"]).grammar(syntax::toml),
         Mode::new("YAML").comment("# ").extensions(&["yaml", "yml"]).grammar(syntax::yaml),
@@ -27,8 +28,8 @@ pub(crate) fn register_builtin(ed: &mut Editor) {
         Mode::new("Lisp").comment(";; ").extensions(&["el", "lisp"]),
         Mode::new("Makefile")
             .comment("# ")
-            .tab_width(8)
-            .indent(IndentStyle::Tabs)
+            .set(TAB_WIDTH, 8)
+            .set(INDENT, "tabs")
             .extensions(&["mk"])
             .file_names(&["makefile", "gnumakefile"])
             .grammar(syntax::make),

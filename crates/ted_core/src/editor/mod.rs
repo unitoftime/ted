@@ -13,16 +13,16 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::{Buffer, BufferId, Buffers};
 use crate::command::{Arg, CommandId, Commands};
-use crate::config::{self, ConfigOp};
+use crate::config::{self, ConfigOp, Script};
 use crate::doc::Doc;
 use crate::ext::Extensions;
 use crate::face::Faces;
 use crate::jobs::{JobContext, JobHandle, Scheduler};
 use crate::key::{format_seq, Key, KeyCode, KeyEvent};
-use crate::keymap::{Binding, KeymapId, Keymaps, Resolved};
+use crate::keymap::{Binding, KeymapDef, KeymapId, Keymaps, Resolved};
 use crate::kill_ring::KillRing;
 use crate::layout::Layout;
-use crate::mode::{IndentStyle, Indentation, Mode, ModeOverrides, ModeRegistry};
+use crate::mode::{IndentStyle, Indentation, Mode, ModeRegistry};
 use crate::plugin::{Hooks, Plugin};
 use crate::project::{FileLists, Project};
 use crate::recentf::RecentFiles;
@@ -30,6 +30,8 @@ use crate::settings::{self, Settings, Value};
 use crate::theme::Theme;
 use crate::ui::{InputHistory, Modal};
 use crate::view::{View, ViewId};
+
+pub use buffers::BufferScope;
 
 /// Chain value an undo command leaves, so consecutive undos keep walking back instead of
 /// undoing the undo.
@@ -204,14 +206,17 @@ impl Editor {
 
     fn load_init_script(&mut self) {
         let Some(path) = self.init_script.clone() else { return };
-        match config::run_init_script(&path) {
-            Ok(ops) => {
-                let errors = self.apply_config(&ops);
-                if let Some(first) = errors.first() {
-                    self.set_status(format!("init.rhai: {}", first));
-                }
+        let errors = match config::run_init_script(&path) {
+            Ok(script) => self.apply_config(&script),
+            Err(e) => vec![e],
+        };
+        match errors.as_slice() {
+            [] => {}
+            [error] => self.set_status(format!("init.rhai: {}", error)),
+            [first, ..] => {
+                crate::commands::help::show_errors(self, "init.rhai", &errors);
+                self.set_status(format!("init.rhai: {} (and {} more)", first, errors.len() - 1));
             }
-            Err(e) => self.set_status(format!("init.rhai: {}", e)),
         }
     }
 
@@ -220,11 +225,19 @@ impl Editor {
     pub fn reload_init(&mut self) {
         let Some(defaults) = self.defaults.take() else { return };
         self.keymaps.restore(&defaults.keymaps);
+        let mode_settings = |modes: &ModeRegistry| -> Vec<u16> {
+            modes.iter().flat_map(|mode| mode.settings().iter().map(|(index, _)| *index)).collect()
+        };
+        let mut changed = mode_settings(&self.modes);
         self.modes = defaults.modes.clone();
         self.refresh_buffer_modes();
+        changed.extend(mode_settings(&self.modes));
         self.faces.clear_customizations();
-        for name in self.settings.restore(&defaults.settings) {
-            self.run_setting_watchers_by_name(&name);
+        changed.extend(self.settings.restore(&defaults.settings));
+        changed.sort_unstable();
+        changed.dedup();
+        for index in changed {
+            self.run_setting_watchers(index);
         }
         self.apply_theme();
         self.defaults = Some(defaults);
@@ -232,20 +245,24 @@ impl Editor {
         self.load_init_script();
     }
 
-    /// Applies config operations, returning an error message for each that failed.
-    pub fn apply_config(&mut self, ops: &[ConfigOp]) -> Vec<String> {
-        ops.iter()
-            .filter_map(|op| {
-                match op {
-                    ConfigOp::Set { key, value } => self.set_setting(key, value),
-                    ConfigOp::Bind { keymap, keys, command } => self.bind(keymap, keys, command),
-                    ConfigOp::Unbind { keymap, keys } => self.unbind(keymap, keys),
-                    ConfigOp::Face { name, face } => self.faces.customize(name, *face),
-                    ConfigOp::Mode { name, overrides } => self.customize_mode(name, overrides),
-                }
-                .err()
-            })
-            .collect()
+    /// Applies what a config script recorded. Returns every error, the script's own and
+    /// those of operations that failed, as `line N: message` in line order.
+    pub fn apply_config(&mut self, script: &Script) -> Vec<String> {
+        let mut errors = script.errors.clone();
+        for (line, op) in &script.ops {
+            let result = match op {
+                ConfigOp::Set { key, value } => self.set_setting(key, value),
+                ConfigOp::Bind { keymap, keys, command } => self.bind(keymap, keys, command),
+                ConfigOp::Unbind { keymap, keys } => self.unbind(keymap, keys),
+                ConfigOp::Face { name, face } => self.faces.customize(name, *face),
+                ConfigOp::Mode { name, values } => self.customize_mode(name, values),
+            };
+            if let Err(e) = result {
+                errors.push((*line, e));
+            }
+        }
+        errors.sort_by_key(|(line, _)| *line);
+        errors.into_iter().map(|(line, e)| format!("line {}: {}", line, e)).collect()
     }
 
     /// Binds `keys` (e.g. `"C-x C-f"`) in the keymap named `keymap` to `spec`: a command
@@ -262,16 +279,6 @@ impl Editor {
         Ok(())
     }
 
-    /// Binds a table of `(keys, command)` defaults in `keymap`. Tables are part of the
-    /// program, so a bad entry is a bug and panics.
-    pub fn bind_all(&mut self, keymap: &str, table: &[(&str, &str)]) {
-        for (keys, command) in table {
-            if let Err(e) = self.bind(keymap, keys, command) {
-                panic!("invalid default binding {} -> {} in '{}': {}", keys, command, keymap, e);
-            }
-        }
-    }
-
     pub fn unbind(&mut self, keymap: &str, keys: &str) -> Result<(), String> {
         let seq = Key::parse_seq(keys)?;
         let map = self.keymaps.id(keymap).ok_or_else(|| format!("Unknown keymap '{}'", keymap))?;
@@ -279,24 +286,107 @@ impl Editor {
         Ok(())
     }
 
-    /// Registers `mode` (replacing one of the same name) with its keymap, named after the
-    /// mode in kebab-case, and returns that keymap.
-    pub fn define_mode(&mut self, mut mode: Mode) -> KeymapId {
-        let keymap = self.keymaps.ensure(&mode.keymap_name());
-        if let Some(parent) = mode.parent_keymap.as_deref() {
-            let parent = self.keymaps.ensure(parent);
-            self.keymaps.get_mut(keymap).parent = Some(parent);
+    /// Defines the keymap `def` names, or adds to it if it exists, and returns it. Every
+    /// command it names must be registered: definitions are part of the program, so a bad
+    /// one is a bug and panics.
+    pub fn define_keymap(&mut self, def: KeymapDef) -> KeymapId {
+        let command = |ed: &Editor, name: &str| {
+            ed.commands.id(name).unwrap_or_else(|| panic!("keymap '{}' names unknown command '{}'", def.name, name))
+        };
+        let self_insert = def.self_insert.as_deref().map(|name| command(self, name));
+        let fallback = def.fallback.as_deref().map(|name| command(self, name));
+        let parent = def.parent.as_deref().map(|name| self.keymaps.ensure(name));
+        let id = self.keymaps.ensure(&def.name);
+        let map = self.keymaps.get_mut(id);
+        map.parent = parent.or(map.parent);
+        map.opaque |= def.opaque;
+        map.self_insert = self_insert.or(map.self_insert);
+        map.fallback = fallback.or(map.fallback);
+        for keys in &def.fallback_exempt {
+            map.fallback_exempt.push(Key::parse(keys).unwrap_or_else(|e| panic!("keymap '{}': {}", def.name, e)));
         }
+        for (keys, spec) in &def.keys {
+            if let Err(e) = self.bind(&def.name, keys, spec) {
+                panic!("invalid default binding {} -> {} in '{}': {}", keys, spec, def.name, e);
+            }
+        }
+        id
+    }
+
+    /// Registers `mode` (replacing one of the same name) and defines its keymap, named
+    /// after the mode in kebab-case, which it returns.
+    pub fn define_mode(&mut self, mut mode: Mode) -> KeymapId {
+        let checked: Vec<(u16, Value)> = mode
+            .settings()
+            .iter()
+            .map(|(index, value)| self.settings.accept(self.settings.name(*index), value))
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| panic!("mode '{}': {}", mode.name, e));
+        for (index, value) in checked {
+            mode.set_value(index, value);
+        }
+        let mut keymap = std::mem::take(&mut mode.keymap_def);
+        keymap.name = mode.keymap_name();
+        let keymap = self.define_keymap(keymap);
         mode.keymap = Some(keymap);
         self.modes.register(mode);
         self.refresh_buffer_modes();
         keymap
     }
 
-    fn customize_mode(&mut self, name: &str, overrides: &ModeOverrides) -> Result<(), String> {
+    /// Applies `mode(name, #{ .. })` from `init.rhai`: the mode's own properties
+    /// (`comment`, `extensions`, `line_numbers`, `highlight_line`), and any setting, which
+    /// then has that value in the mode's buffers.
+    fn customize_mode(&mut self, name: &str, values: &settings::Map) -> Result<(), String> {
+        const PROPERTIES: [&str; 4] = ["comment", "extensions", "line_numbers", "highlight_line"];
+        let settings: Vec<(u16, Value)> = values
+            .iter()
+            .filter(|(key, _)| !PROPERTIES.contains(&key.as_str()))
+            .map(|(key, value)| self.settings.accept(key, value))
+            .collect::<Result<_, _>>()?;
+        self.update_mode(name, |mode| {
+            for (key, value) in values {
+                let invalid = |kind: &str| Err(format!("'{}' must be {}", key, kind));
+                match (key.as_str(), value) {
+                    ("comment", Value::Str(prefix)) => mode.comment_prefix.clone_from(prefix),
+                    ("comment", _) => return invalid("a string"),
+                    ("extensions", Value::List(list)) => {
+                        let extensions = list.iter().map(|ext| match ext {
+                            Value::Str(ext) => Some(ext.trim_start_matches('.').to_string()),
+                            _ => None,
+                        });
+                        match extensions.collect() {
+                            Some(extensions) => mode.extensions = extensions,
+                            None => return invalid("an array of strings"),
+                        }
+                    }
+                    ("extensions", _) => return invalid("an array of strings"),
+                    ("line_numbers", Value::Bool(show)) => mode.line_numbers = *show,
+                    ("highlight_line", Value::Bool(highlight)) => mode.highlight_line = *highlight,
+                    ("line_numbers" | "highlight_line", _) => return invalid("true or false"),
+                    _ => {}
+                }
+            }
+            for (index, value) in settings.iter().cloned() {
+                mode.set_value(index, value);
+            }
+            Ok(())
+        })?;
+        for (index, _) in settings {
+            self.run_setting_watchers(index);
+        }
+        Ok(())
+    }
+
+    /// Replaces mode `name` with a copy `change` made, and points its buffers at it.
+    pub(crate) fn update_mode(
+        &mut self,
+        name: &str,
+        change: impl FnOnce(&mut Mode) -> Result<(), String>,
+    ) -> Result<(), String> {
         let mode = self.modes.get(name).ok_or_else(|| format!("Unknown mode '{}'", name))?;
         let mut mode = Mode::clone(&mode);
-        overrides.apply(&mut mode);
+        change(&mut mode)?;
         self.modes.register(mode);
         self.refresh_buffer_modes();
         Ok(())
@@ -318,10 +408,7 @@ impl Editor {
 
     fn apply_indentation(&mut self) {
         let width = self.settings.get(settings::TAB_WIDTH).clamp(1, 16) as usize;
-        let style = match self.settings.get(settings::INDENT) {
-            "tabs" => IndentStyle::Tabs,
-            _ => IndentStyle::Spaces,
-        };
+        let style = IndentStyle::from_setting(self.settings.get(settings::INDENT));
         self.buffers.set_indentation(Indentation { width, style });
     }
 

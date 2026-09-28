@@ -46,21 +46,23 @@ ted reads `~/.config/ted/init.rhai` (or `$XDG_CONFIG_HOME/ted/init.rhai`) at sta
 ```rhai
 set("theme", "tango-dark");
 set("tab_width", 4);
-set("lsp.settings.go", #{ staticcheck: true });
 set("completion.auto", "trigger");   // "off" (default), "trigger" (after `.`), "typing"
-set("format_on_save", true);
 face("keyword", #{ fg: "#c586c0", bold: true });
 
 bind("M-o", "other-window");
-bind_mode("markdown", "C-c C-t", "toggle-theme");
+bind(["C-x j", "C-x C-j"], "switch-to-buffer");
+bind("markdown", "C-c C-t", "toggle-theme");   // in a mode's (or any other) keymap
 unbind("C-z");
 
+// A mode's own properties, and settings that apply only to its buffers.
 mode("markdown", #{ line_numbers: false });
+mode("go", #{ format_on_save: true, "lsp.settings": #{ staticcheck: true } });
 ```
 
 The global `C-c <key>` space is left to the user, as in Emacs. `describe-key` shows what a
 key does and prints the `bind` line that would change it, and `describe-setting` lists
-every setting, including plugin settings.
+every setting, including plugin settings. Mistakes are reported with their line, and the
+rest of the file still applies.
 
 ## Architecture
 

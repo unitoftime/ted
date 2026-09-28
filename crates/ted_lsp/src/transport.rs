@@ -7,14 +7,14 @@
 //! diagnostics and messages to the UI thread as editor closures.
 
 use std::io::{self, BufReader, BufWriter, Write};
-use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
 use ropey::Rope;
 use serde_json::{json, Map, Value};
+use ted_core::process::{Piped, Program};
 use ted_core::{JobContext, JobHandle};
 
 use crate::client::{self, ServerId};
@@ -82,29 +82,15 @@ pub struct Transport {
 }
 
 impl Transport {
-    /// Starts `argv` in `root`. Everything the server sends is delivered through `ctx`,
-    /// tagged with `server`.
+    /// Starts `program`. Everything the server sends is delivered through `ctx`, tagged
+    /// with `server`.
     pub fn spawn(
-        argv: &[&str],
-        root: &Path,
+        program: &Program,
         server: ServerId,
         (job, ctx): (JobHandle, JobContext),
         context: ServerContext,
     ) -> io::Result<Self> {
-        let (program, args) =
-            argv.split_first().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty server command"))?;
-        let mut child = Command::new(program)
-            .args(args)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
-        let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
-            let _ = child.kill();
-            return Err(io::Error::other("server pipes unavailable"));
-        };
+        let Piped { child, stdin, stdout } = program.spawn_piped()?;
         let (tx, rx) = channel();
         thread::spawn(move || write_loop(stdin, rx));
         let replies = tx.clone();

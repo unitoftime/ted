@@ -130,8 +130,8 @@ pub fn refresh_buffer(ed: &mut Editor, id: BufferId) {
     let Some(buf) = ed.buffers.get(id) else {
         return;
     };
-    let stored =
-        buf.path().and_then(|p| ed.ext::<Store>()?.by_path.get(p)).filter(|_| ed.settings.get(handles(ed).diagnostics));
+    let shown = ed.settings.get_in(handles(ed).diagnostics, buf.mode());
+    let stored = buf.path().and_then(|p| ed.ext::<Store>()?.by_path.get(p)).filter(|_| shown);
     let decorations: Vec<Decoration> = match (stored, ed.ext::<DiagnosticFaces>()) {
         (Some((encoding, found)), Some(faces)) => {
             found.iter().map(|d| Decoration::new(char_range(buf, d, *encoding), faces.get(d.severity))).collect()
@@ -149,7 +149,7 @@ pub fn refresh_buffer(ed: &mut Editor, id: BufferId) {
 /// Post-command hook: shows the diagnostic under the cursor (else the first on its line)
 /// when the cursor arrives on it.
 pub fn echo(ed: &mut Editor) {
-    if !ed.settings.get(handles(ed).diagnostics) || ed.has_modal() {
+    if !ed.settings.get_in(handles(ed).diagnostics, ed.active_buffer().mode()) || ed.has_modal() {
         return;
     }
     let id = ed.active_buffer_id();

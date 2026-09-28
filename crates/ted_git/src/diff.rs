@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use ted_core::jobs::JobHandle;
 use ted_core::rows::{self, RowText};
-use ted_core::{BufferId, Editor, FaceId};
+use ted_core::{BufferId, BufferScope, Editor, FaceId};
 
 use crate::changes::{self, Action, Fold, Line};
 use crate::git::{args, git};
@@ -107,7 +107,7 @@ pub fn show(ed: &mut Editor, root: PathBuf, source: Source) {
 
 /// Reruns the diff of `root`'s diff buffer, if it has one (after staging changed it).
 pub fn refresh(ed: &mut Editor, root: PathBuf) {
-    let found = ed.buffers.find(|b| b.local::<DiffBuffer>().is_some() && b.directory() == root);
+    let found = ed.find_generated(MODE, BufferScope::Dir(&root));
     let Some((id, source)) = found.and_then(|id| Some((id, ed.buffers[id].local::<DiffBuffer>()?.source.clone()?)))
     else {
         return;
@@ -175,10 +175,15 @@ fn render(ed: &mut Editor, id: BufferId, fresh: bool) {
         text.line(&[("No changes", Some(FaceId::SHADOW))]);
     }
     let mut lines = Vec::new();
-    changes::write(&state.files, &faces, |line| state.is_open(line), |line, parts| {
-        text.row(changes::row_spec(&state.files, line, ()), parts);
-        lines.push(line);
-    });
+    changes::write(
+        &state.files,
+        &faces,
+        |line| state.is_open(line),
+        |line, parts| {
+            text.row(changes::row_spec(&state.files, line, ()), parts);
+            lines.push(line);
+        },
+    );
 
     ed.buffers[id].local_mut::<DiffBuffer>().lines = lines;
     if fresh {
