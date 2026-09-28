@@ -11,7 +11,8 @@
   directory listings, search, builds, git, terminals and language servers, all fast enough
   that it doesn't feel remote.
 - [x] **More language server features.** Completion, hover, rename and formatting.
-- [ ] Package a few high-quality fonts inside the editor?
+- [x] Package a few high-quality fonts inside the editor?
+- [ ] I need a way to ripgrep search relative to wherever I am. Lik C-c C-s searches the project, but a lot of times I want to like search downstream of where I currently am
 
 ## Bugs
 

@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use cosmic_text::fontdb::FaceInfo;
+use cosmic_text::fontdb::Source;
 use cosmic_text::{
-    Attrs, Buffer as CosmicBuffer, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style as CosmicStyle,
-    SwashCache, SwashContent, Weight,
+    Attrs, Buffer as CosmicBuffer, Family, FontSystem, Metrics, Shaping, Style as CosmicStyle, SwashCache,
+    SwashContent, Weight,
 };
 use softbuffer::{Context, Surface};
 use ted_core::frame::{Color, DrawCmd, Frame, Rect, TextSpan};
@@ -30,26 +30,42 @@ struct Glyph {
 
 type GlyphKey = (char, bool, bool);
 
-#[derive(Debug, Clone, Copy)]
-struct MonoFont {
-    family: Family<'static>,
-    /// The family has no italic face, so italics are its regular glyphs skewed: asking
-    /// for italic would fall back to another family, often a proportional one that
-    /// doesn't fit the cell grid.
-    fake_italic: bool,
+/// The monospace family all text is drawn in. It is compiled into the binary so text
+/// looks the same on every machine; system fonts stay loaded as the fallback for what it
+/// doesn't cover (CJK, emoji, symbols).
+const FONT_FAMILY: &str = "Source Code Pro";
+
+const FONT_FACES: [&[u8]; 4] = [
+    include_bytes!("../fonts/SourceCodePro-Regular.otf"),
+    include_bytes!("../fonts/SourceCodePro-Bold.otf"),
+    include_bytes!("../fonts/SourceCodePro-It.otf"),
+    include_bytes!("../fonts/SourceCodePro-BoldIt.otf"),
+];
+
+/// System fonts plus the bundled family, which replaces any installed copy of it: an
+/// installed copy would win ties with the bundled one and could be a different version.
+fn font_system() -> FontSystem {
+    let mut font_system = FontSystem::new_with_fonts(FONT_FACES.map(|face| Source::Binary(Arc::new(face))));
+    let db = font_system.db_mut();
+    let installed: Vec<_> = db
+        .faces()
+        .filter(|face| !matches!(face.source, Source::Binary(_)))
+        .filter(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(FONT_FAMILY)))
+        .map(|face| face.id)
+        .collect();
+    for id in installed {
+        db.remove_face(id);
+    }
+    font_system
 }
 
-impl MonoFont {
-    fn attrs(self, bold: bool, italic: bool) -> Attrs<'static> {
-        let mut attrs = Attrs::new().family(self.family);
-        if bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
-        match (italic, self.fake_italic) {
-            (true, true) => attrs.cache_key_flags(CacheKeyFlags::FAKE_ITALIC),
-            (true, false) => attrs.style(CosmicStyle::Italic),
-            (false, _) => attrs,
-        }
+fn attrs(bold: bool, italic: bool) -> Attrs<'static> {
+    let attrs = Attrs::new().family(Family::Name(FONT_FAMILY));
+    let attrs = if bold { attrs.weight(Weight::BOLD) } else { attrs };
+    if italic {
+        attrs.style(CosmicStyle::Italic)
+    } else {
+        attrs
     }
 }
 
@@ -60,7 +76,6 @@ pub struct GuiRenderer {
     swash_cache: SwashCache,
     shaper: CosmicBuffer,
     glyphs: HashMap<GlyphKey, Option<Glyph>>,
-    mono: MonoFont,
     /// (size, line height) in pixels the cell metrics and glyph cache are built for.
     font: (f32, f32),
     /// Baseline offset from the top of a cell, shared by every glyph (fallback fonts
@@ -76,8 +91,7 @@ impl GuiRenderer {
     pub fn new(window: Arc<Window>, font: (f32, f32)) -> Self {
         let context = Context::new(window.clone()).expect("Failed to create softbuffer context");
         let surface = Surface::new(&context, window.clone()).expect("Failed to create softbuffer surface");
-        let mut font_system = FontSystem::new();
-        let mono = resolve_monospace_font(&font_system);
+        let mut font_system = font_system();
         let shaper = CosmicBuffer::new(&mut font_system, Metrics::new(font.0, font.1));
         let mut renderer = Self {
             _context: context,
@@ -86,7 +100,6 @@ impl GuiRenderer {
             swash_cache: SwashCache::new(),
             shaper,
             glyphs: HashMap::new(),
-            mono,
             font: (0.0, 0.0),
             baseline: 0.0,
             char_w: 0.0,
@@ -105,7 +118,7 @@ impl GuiRenderer {
         let (font_size, line_height) = font;
         self.font = font;
         self.shaper.set_metrics(&mut self.font_system, Metrics::new(font_size, line_height));
-        self.shaper.set_text(&mut self.font_system, "M", self.mono.attrs(false, false), Shaping::Advanced);
+        self.shaper.set_text(&mut self.font_system, "M", attrs(false, false), Shaping::Advanced);
         self.shaper.shape_until_scroll(&mut self.font_system, false);
         let first_run = self.shaper.layout_runs().next();
         let char_w = first_run.as_ref().and_then(|run| run.glyphs.first()).map(|g| g.w).unwrap_or(9.0);
@@ -150,7 +163,6 @@ impl GuiRenderer {
                                 &mut self.font_system,
                                 &mut self.swash_cache,
                                 &mut self.shaper,
-                                self.mono,
                                 self.baseline,
                                 key,
                             );
@@ -181,12 +193,11 @@ fn rasterize(
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     shaper: &mut CosmicBuffer,
-    mono: MonoFont,
     baseline: f32,
     (ch, bold, italic): GlyphKey,
 ) -> Option<Glyph> {
     let mut utf8 = [0u8; 4];
-    shaper.set_text(font_system, ch.encode_utf8(&mut utf8), mono.attrs(bold, italic), Shaping::Advanced);
+    shaper.set_text(font_system, ch.encode_utf8(&mut utf8), attrs(bold, italic), Shaping::Advanced);
     shaper.shape_until_scroll(font_system, false);
     let run = shaper.layout_runs().next()?;
     let physical = run.glyphs.first()?.physical((0.0, 0.0), 1.0);
@@ -298,66 +309,33 @@ impl Canvas<'_> {
     }
 }
 
-/// Monospace families to draw text in, in order of preference.
-const MONOSPACE_FAMILIES: &[&str] =
-    &["Noto Sans Mono", "DejaVu Sans Mono", "Liberation Mono", "Source Code Pro", "Adwaita Mono"];
-
-fn faces_of<'a>(font_system: &'a FontSystem, family: &'a str) -> impl Iterator<Item = &'a FaceInfo> + 'a {
-    font_system.db().faces().filter(move |face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
-}
-
-fn resolve_monospace_font(font_system: &FontSystem) -> MonoFont {
-    for &candidate in MONOSPACE_FAMILIES {
-        let mut faces = faces_of(font_system, candidate).peekable();
-        if faces.peek().is_some() {
-            let has_italic = faces.any(|face| face.style != CosmicStyle::Normal);
-            return MonoFont { family: Family::Name(candidate), fake_italic: !has_italic };
-        }
-    }
-
-    MonoFont { family: Family::Monospace, fake_italic: false }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Machines without any of the preferred families fall back to the generic one.
+    /// Every style draws from its own bundled face: a fallback family's glyphs don't fit
+    /// the cell grid, and an installed copy of the family could be another version.
     #[test]
-    fn test_font_resolution() {
-        let font_system = FontSystem::new();
-        if !MONOSPACE_FAMILIES.iter().any(|name| faces_of(&font_system, name).next().is_some()) {
-            return;
-        }
-        assert_ne!(resolve_monospace_font(&font_system).family, Family::Monospace);
-    }
-
-    /// Italic text stays in the monospace family, real italic face or not: a fallback
-    /// family's glyphs don't fit the cell grid.
-    #[test]
-    fn test_italic_stays_in_the_monospace_family() {
-        let mut font_system = FontSystem::new();
-        let mono = resolve_monospace_font(&font_system);
-        let Family::Name(name) = mono.family else { return };
+    fn test_styles_use_bundled_faces() {
+        let mut font_system = font_system();
         let mut buf = CosmicBuffer::new(&mut font_system, Metrics::new(14.0, 20.0));
-        buf.set_text(&mut font_system, "a", mono.attrs(false, true), Shaping::Advanced);
-        buf.shape_until_scroll(&mut font_system, false);
-        let font_id = buf.layout_runs().next().and_then(|run| run.glyphs.first().map(|g| g.font_id)).unwrap();
-        let face = font_system.db().face(font_id).unwrap();
-        assert!(
-            face.families.iter().any(|(family, _)| family.eq_ignore_ascii_case(name)),
-            "italic fell back to {:?}",
-            face.families
-        );
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            buf.set_text(&mut font_system, "a", attrs(bold, italic), Shaping::Advanced);
+            buf.shape_until_scroll(&mut font_system, false);
+            let font_id = buf.layout_runs().next().and_then(|run| run.glyphs.first().map(|g| g.font_id)).unwrap();
+            let face = font_system.db().face(font_id).unwrap();
+            assert!(matches!(face.source, Source::Binary(_)), "{:?} is not bundled", face.post_script_name);
+            assert_eq!(face.weight >= Weight::BOLD, bold, "{:?}", face.post_script_name);
+            assert_eq!(face.style == CosmicStyle::Italic, italic, "{:?}", face.post_script_name);
+        }
     }
 
     #[test]
     fn test_shaping_advanced_no_ligature_collapse() {
-        let mut font_system = FontSystem::new();
-        let family = resolve_monospace_font(&font_system).family;
+        let mut font_system = font_system();
 
         let mut buf = CosmicBuffer::new(&mut font_system, Metrics::new(14.0, 20.0));
-        buf.set_text(&mut font_system, "Find file: ", Attrs::new().family(family), Shaping::Advanced);
+        buf.set_text(&mut font_system, "Find file: ", attrs(false, false), Shaping::Advanced);
         buf.shape_until_scroll(&mut font_system, false);
 
         let glyphs: Vec<_> = buf.layout_runs().flat_map(|r| r.glyphs.iter().cloned()).collect();
@@ -367,11 +345,10 @@ mod tests {
 
     #[test]
     fn test_shaping_advanced_makefile_lines() {
-        let mut font_system = FontSystem::new();
-        let family = resolve_monospace_font(&font_system).family;
+        let mut font_system = font_system();
 
         let mut buf = CosmicBuffer::new(&mut font_system, Metrics::new(14.0, 20.0));
-        buf.set_text(&mut font_system, "all: build", Attrs::new().family(family), Shaping::Advanced);
+        buf.set_text(&mut font_system, "all: build", attrs(false, false), Shaping::Advanced);
         buf.shape_until_scroll(&mut font_system, false);
 
         let glyphs: Vec<_> = buf.layout_runs().flat_map(|r| r.glyphs.iter().cloned()).collect();
@@ -388,7 +365,7 @@ mod tests {
         }
 
         let makefile_line = "\tcargo build --release";
-        buf.set_text(&mut font_system, makefile_line, Attrs::new().family(family), Shaping::Advanced);
+        buf.set_text(&mut font_system, makefile_line, attrs(false, false), Shaping::Advanced);
         buf.shape_until_scroll(&mut font_system, false);
 
         let adv_glyphs: Vec<_> = buf.layout_runs().flat_map(|r| r.glyphs.iter().cloned()).collect();
