@@ -25,10 +25,22 @@ pub fn run(
     on_success: impl FnOnce(&mut Editor) + Send + 'static,
 ) {
     let label = format!("git {}", args.join(" "));
+    run_work(ed, root, label, done, move |root| git_output(root, &args, stdin.as_deref()), on_success);
+}
+
+/// As `run`, for `work` that may take several git commands, logged as `label`.
+pub fn run_work(
+    ed: &mut Editor,
+    root: PathBuf,
+    label: String,
+    done: &str,
+    work: impl FnOnce(&Path) -> Output + Send + 'static,
+    on_success: impl FnOnce(&mut Editor) + Send + 'static,
+) {
     let done = done.to_string();
     ed.set_status(format!("Running {}...", label));
     ed.spawn(move |ctx| {
-        let output = git_output(&root, &args, stdin.as_deref());
+        let output = work(&root);
         ctx.send(move |ed| {
             log(ed, &root, &label, &output);
             if output.ok {

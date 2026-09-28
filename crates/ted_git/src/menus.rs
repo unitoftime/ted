@@ -2,9 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+use ted_core::process::Output;
 use ted_core::{Editor, Menu, PickerItem};
 
-use crate::git::args;
+use crate::git::{args, git, git_output};
 use crate::diff::{self, Source};
 use crate::{commit, model, process, status};
 
@@ -93,9 +94,9 @@ pub fn stash(ed: &mut Editor, root: PathBuf) {
     let (r1, r2, r3, r4, r5, r6) = (root.clone(), root.clone(), root.clone(), root.clone(), root.clone(), root);
     let menu = Menu::new("git-stash", "Stash")
         .group("Stash")
-        .entry('z', "Both (worktree and index)", move |ed| stash_push(ed, r1, &[]))
-        .entry('i', "Index", move |ed| stash_push(ed, r2, &["--staged"]))
-        .entry('u', "Including untracked", move |ed| stash_push(ed, r3, &["--include-untracked"]))
+        .entry('z', "Both", move |ed| stash_push(ed, r1, Changes::Both))
+        .entry('s', "Staged", move |ed| stash_push(ed, r2, Changes::Staged))
+        .entry('u', "Unstaged", move |ed| stash_push(ed, r3, Changes::Unstaged))
         .group("Use")
         .entry('a', "Apply", move |ed| with_stash(ed, r4, "Apply", |ed, root, name| use_stash(ed, root, "apply", name)))
         .entry('p', "Pop", move |ed| with_stash(ed, r5, "Pop", |ed, root, name| use_stash(ed, root, "pop", name)))
@@ -103,16 +104,65 @@ pub fn stash(ed: &mut Editor, root: PathBuf) {
     ed.push_modal(menu);
 }
 
-/// `git stash push <flags>`, with a message if one is given.
-fn stash_push(ed: &mut Editor, root: PathBuf, flags: &'static [&'static str]) {
+/// Which changes to tracked files a stash takes.
+#[derive(Clone, Copy)]
+enum Changes {
+    Both,
+    Staged,
+    Unstaged,
+}
+
+/// Stashes `changes`, with a message if one is given.
+fn stash_push(ed: &mut Editor, root: PathBuf, changes: Changes) {
     ed.prompt("git-stash-message", "Stash message (optional): ", "", move |ed, message| {
+        if let Changes::Unstaged = changes {
+            let work = move |root: &Path| match stash_unstaged(root, &message) {
+                Ok(()) => Output { ok: true, stdout: String::new(), stderr: String::new() },
+                Err(stderr) => Output { ok: false, stdout: String::new(), stderr },
+            };
+            return process::run_work(ed, root, "git stash (unstaged changes)".to_string(), "Stashed", work, |_| {});
+        }
         let mut git_args = args(&["stash", "push"]);
-        git_args.extend(flags.iter().map(|f| f.to_string()));
+        if let Changes::Staged = changes {
+            git_args.push("--staged".to_string());
+        }
         if !message.is_empty() {
             git_args.extend(["-m".to_string(), message]);
         }
         process::run(ed, root, git_args, None, "Stashed", |_| {});
     });
+}
+
+/// Stashes only the changes the worktree has over the index, which git can't do alone:
+/// the stash `git stash create` makes is stored on a base commit holding the index
+/// instead of on HEAD, so showing or applying it gives just those changes. The worktree
+/// then goes back to the index, once the stash is safely stored. Blocks; runs in a job.
+fn stash_unstaged(root: &Path, message: &str) -> Result<(), String> {
+    let run = |list: &[&str]| git(root, &args(list), None);
+    if git_output(root, &args(&["diff", "--quiet"]), None).ok {
+        return Err("No unstaged changes to stash".to_string());
+    }
+    let mut create = vec!["stash", "create"];
+    if !message.is_empty() {
+        create.push(message);
+    }
+    let stash = run(&create)?;
+    // Its parents (HEAD, then the index's commit), tree and message.
+    let info = run(&["show", "-s", "--format=%P%x00%T%x00%s", stash.trim()])?;
+    let unexpected = || Err(format!("Unexpected stash commit: {}", info.trim()));
+    let mut fields = info.trim_end().split('\0');
+    let (Some(parents), Some(tree), Some(subject)) = (fields.next(), fields.next(), fields.next()) else {
+        return unexpected();
+    };
+    let mut parents = parents.split_whitespace();
+    let (Some(head), Some(index)) = (parents.next(), parents.next()) else {
+        return unexpected();
+    };
+    // A stash's parents must differ, so the base is a new commit rather than the index's.
+    let base = run(&["commit-tree", &format!("{}^{{tree}}", index), "-p", head, "-m", subject])?;
+    let commit = run(&["commit-tree", tree, "-p", base.trim(), "-p", index, "-m", subject])?;
+    run(&["stash", "store", "-m", subject, commit.trim()])?;
+    run(&["checkout-index", "--all", "--force", "--index"]).map(|_| ())
 }
 
 fn use_stash(ed: &mut Editor, root: PathBuf, action: &str, name: String) {
