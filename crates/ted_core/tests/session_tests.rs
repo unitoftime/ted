@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use ted_core::session::Session;
 use ted_core::{Editor, SplitType};
 
 /// A restart must bring back the same files, splits, active window, cursors, scratch text
@@ -21,7 +20,7 @@ fn test_session_round_trips_through_a_file() {
     editor.active_view_mut().goto(42);
 
     let path = std::env::temp_dir().join(format!("ted_session_test_{}", std::process::id()));
-    Session::capture(&editor).write(&path).unwrap();
+    ted_core::session::write_handoff(&editor, &path).unwrap();
     let mut restored = Editor::new(&[]);
     ted_core::session::resume(&mut restored, &path);
     assert!(!path.exists(), "the handoff file is consumed");

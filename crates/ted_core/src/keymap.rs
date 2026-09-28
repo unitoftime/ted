@@ -43,6 +43,7 @@ const BUILTIN: &[&str] = &[
     "completion",
     "tooltip",
     "file-search",
+    "workspace-switch",
 ];
 
 impl KeymapId {
@@ -65,6 +66,8 @@ impl KeymapId {
     pub const TOOLTIP: KeymapId = KeymapId(11);
     /// The file search picker, on top of `PICKER`.
     pub const FILE_SEARCH: KeymapId = KeymapId(12);
+    /// The workspace switcher, on top of `PICKER`: manages the selected workspace.
+    pub const WORKSPACE_SWITCH: KeymapId = KeymapId(13);
 }
 
 /// A keymap as `Editor::define_keymap` installs it: plain data naming commands, resolved

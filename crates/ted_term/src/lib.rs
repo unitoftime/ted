@@ -17,39 +17,94 @@
 //! `M-x term` or `C-x t` opens a terminal in the current buffer's directory. When the shell
 //! exits (`exit`, `C-d`) the terminal buffer closes. Flow control is off, so `C-s` reaches
 //! the program instead of freezing output.
+//!
+//! Programs run in the terminal host (`host`), a process ted starts when it first needs
+//! one, so a named workspace's terminals keep running after ted quits and the next ted
+//! reattaches them, screen and history included (`terminal.scrollback` lines of it).
+//! Killing a terminal's buffer ends its program, as does quitting while only the unnamed
+//! workspace shows it.
 
+mod client;
+pub mod host;
 mod input;
 mod palette;
+mod protocol;
 mod render;
+mod replay;
 mod session;
 mod snapshot;
+
+use std::collections::HashSet;
+use std::io;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use ted_core::kill_ring::KillMode;
+use ted_core::settings::Setting;
 use ted_core::{Arg, BufferId, Editor, KeymapDef, Mode, Plugin};
 
+use crate::client::{Connection, Launch};
+use crate::protocol::{End, ToHost};
 use crate::render::TermRenderer;
 use crate::session::{session, Session, TermBuffer};
 
-/// The terminal plugin. `TermPlugin::default()` runs the user's login shell.
-#[derive(Default)]
+/// The terminal plugin. `TermPlugin::default()` runs the user's login shell, in a host on
+/// a thread of this process (terminals end with it); `persistent` runs them in the host
+/// process instead.
 pub struct TermPlugin {
     shell: Option<(String, Vec<String>)>,
+    launch: Launch,
+}
+
+impl Default for TermPlugin {
+    fn default() -> Self {
+        Self { shell: None, launch: Launch::Thread }
+    }
 }
 
 impl TermPlugin {
     /// Runs `program args...` instead of the login shell.
     pub fn with_shell(program: &str, args: &[&str]) -> Self {
-        Self { shell: Some((program.to_string(), args.iter().map(|a| a.to_string()).collect())) }
+        let shell = Some((program.to_string(), args.iter().map(|a| a.to_string()).collect()));
+        Self { shell, ..Self::default() }
+    }
+
+    /// Runs terminals in the host process, started as `exe --term-host <socket>` (see
+    /// `host`), so they outlive this ted.
+    pub fn persistent(self, exe: PathBuf) -> Self {
+        Self { launch: Launch::Process(exe), ..self }
     }
 }
 
-/// Editor-wide: the shell new terminals run (`None` for the login shell).
+/// Editor-wide terminal configuration.
+struct Config {
+    /// The shell new terminals run (`None` for the login shell).
+    shell: Option<(String, Vec<String>)>,
+    launch: Launch,
+    scrollback: Setting<i64>,
+}
+
+/// The connection to the host, made when a terminal first needs it.
 #[derive(Default)]
-struct ShellCommand(Option<(String, Vec<String>)>);
+struct HostLink(Option<Rc<Connection>>);
+
+fn config(ed: &Editor) -> &Config {
+    ed.ext::<Config>().expect("set when the terminal plugin starts")
+}
+
+/// The connection to the host, starting the host first if none is running and `start`.
+fn connection(ed: &mut Editor, start: bool) -> io::Result<Rc<Connection>> {
+    if let Some(connection) = ed.ext::<HostLink>().and_then(|link| link.0.clone()).filter(|c| c.is_alive()) {
+        return Ok(connection);
+    }
+    let connection = Rc::new(Connection::open(&config(ed).launch, start)?);
+    ed.ext_mut::<HostLink>().0 = Some(connection.clone());
+    Ok(connection)
+}
 
 const TERMINAL_MODE: &str = "Terminal";
 const VIEW_MODE: &str = "Terminal View";
@@ -64,25 +119,41 @@ fn unique_name(ed: &Editor) -> String {
         .expect("some name is free")
 }
 
-/// Opens a new terminal running the user's shell in the active buffer's working directory.
-fn open(ed: &mut Editor) {
+/// Opens a terminal in the active buffer's working directory: terminal `attach` (one an
+/// earlier ted left running) if given, else a new one running the user's shell.
+fn open(ed: &mut Editor, attach: Option<u64>) {
     let dir = ed.active_buffer().directory();
     let id = ed.new_buffer(unique_name(ed), TERMINAL_MODE);
     ed.buffers[id].set_directory(&dir);
-    let shell = session::shell(ed.ext::<ShellCommand>().and_then(|s| s.0.clone()), &dir);
-    match Session::spawn(ed, id, &shell) {
-        Ok(session) => {
-            let renderer = TermRenderer { handle: session.handle.clone() };
-            let buf = &mut ed.buffers[id];
-            buf.set_renderer(Some(Box::new(renderer)));
-            buf.local_mut::<TermBuffer>().0 = Some(session);
-            ed.show_buffer(id);
-        }
+    match start(ed, id, attach) {
+        Ok(()) => ed.show_buffer(id),
         Err(e) => {
             ed.kill_buffer(id);
             ed.set_status(format!("Cannot start terminal: {}", e));
         }
     }
+}
+
+/// Makes terminal buffer `id` show terminal `attach`, or a new one running the user's
+/// shell in the buffer's directory. The buffer saves the terminal's id, for a later ted
+/// to reattach it.
+fn start(ed: &mut Editor, id: BufferId, attach: Option<u64>) -> io::Result<()> {
+    let connection = connection(ed, true)?;
+    let config = config(ed);
+    let scrollback = ed.settings.get(config.scrollback).max(0) as usize;
+    let session = match attach {
+        Some(terminal) => Session::attach(ed, connection, id, terminal, scrollback),
+        None => {
+            let shell = session::shell(config.shell.clone(), &ed.buffers[id].directory());
+            Session::spawn(ed, connection, id, &shell, scrollback)
+        }
+    };
+    let renderer = TermRenderer { handle: session.handle.clone() };
+    let buf = &mut ed.buffers[id];
+    buf.set_restore_argument(Some(session.handle.id.to_string()));
+    buf.set_renderer(Some(Box::new(renderer)));
+    buf.local_mut::<TermBuffer>().0 = Some(session);
+    Ok(())
 }
 
 /// Terminal mode's fallback: sends the key to the program.
@@ -171,7 +242,7 @@ fn wheel(ed: &mut Editor, lines: usize, up: bool) {
     let (mode, size) = (*session.handle.term.lock().mode(), session.handle.size());
     if mode.intersects(TermMode::MOUSE_MODE) {
         let button = if up { 64 } else { 65 };
-        let (col, row) = (size.cols / 2 + 1, size.lines / 2 + 1);
+        let (col, row) = (size.cols as usize / 2 + 1, size.lines as usize / 2 + 1);
         let event = if mode.contains(TermMode::SGR_MOUSE) {
             format!("\x1b[<{};{};{}M", button, col, row)
         } else {
@@ -214,7 +285,7 @@ fn view_mode(ed: &mut Editor, id: BufferId) {
 fn terminal_mode(ed: &mut Editor) {
     let id = ed.active_buffer_id();
     let Some(session) = session(ed, id) else { return };
-    if session.exited {
+    if session.ended {
         ed.set_status("The terminal's process has exited");
         return;
     }
@@ -227,17 +298,48 @@ fn terminal_mode(ed: &mut Editor) {
     ed.set_status("");
 }
 
-/// The shell exited (`exit`, `C-d`): close the terminal; its windows go back to what they
-/// showed before.
-pub(crate) fn exited(ed: &mut Editor, id: BufferId, code: Option<i32>) {
+/// Terminal buffer `id`'s terminal is no longer attached to this ted. A shell that exited
+/// (`exit`, `C-d`) closes the terminal, and its windows go back to what they showed
+/// before; a terminal to reattach that is gone is replaced by a new shell.
+pub(crate) fn ended(ed: &mut Editor, id: BufferId, end: End) {
     let Some(session) = session(ed, id) else { return };
-    session.exited = true;
+    session.ended = true;
+    if end == End::Missing {
+        if let Some(session) = ed.buffers[id].local_mut::<TermBuffer>().0.take() {
+            session.shutdown();
+        }
+        if start(ed, id, None).is_ok() {
+            return;
+        }
+    }
     let name = ed.buffers[id].name().to_string();
     ed.kill_buffer(id);
-    ed.set_status(match code {
-        Some(code) if code != 0 => format!("{} exited with code {}", name, code),
-        _ => format!("{} exited", name),
+    ed.set_status(match end {
+        End::Exited(Some(code)) if code != 0 => format!("{} exited with code {}", name, code),
+        End::Exited(_) => format!("{} exited", name),
+        End::Missing => format!("Cannot start {}", name),
+        End::Failed(reason) => format!("Cannot run {}: {}", name, reason),
+        End::Detached => format!("{} was attached in another ted", name),
     });
+}
+
+/// As the editor quits: terminals only the unnamed workspace shows end, since no later ted
+/// could reattach them. A restart keeps them all, to reattach them.
+fn quitting(ed: &mut Editor) {
+    if ed.restart.is_some() {
+        return;
+    }
+    let named = ed.workspaces.loaded().iter().filter(|ws| ws.name.is_some());
+    let kept: HashSet<BufferId> = named.flat_map(|ws| ws.buffers().iter().copied()).collect();
+    for id in ed.buffers.ids() {
+        if kept.contains(&id) {
+            continue;
+        }
+        if let Some(session) = session(ed, id) {
+            session.shutdown();
+            session.ended = true;
+        }
+    }
 }
 
 impl Plugin for TermPlugin {
@@ -247,10 +349,18 @@ impl Plugin for TermPlugin {
 
     fn init(&mut self, ed: &mut Editor) {
         let term_face = palette::register_faces(&mut ed.faces);
-        ed.ext_mut::<ShellCommand>().0 = self.shell.clone();
+        let scrollback = ed.settings.define(
+            "terminal.scrollback",
+            2000,
+            "Lines of history each terminal keeps, and a ted reattaching it is shown",
+        );
+        ed.set_ext(Config { shell: self.shell.clone(), launch: self.launch.clone(), scrollback });
 
         let c = &mut ed.commands;
-        c.register("term", "Open a terminal in the current directory", |ed, _| open(ed));
+        // With a terminal's id (restoring a session), reattaches that terminal.
+        c.register("term", "Open a terminal in the current directory", |ed, arg| {
+            open(ed, arg.int().map(|id| id as u64))
+        });
         c.register_hidden("term-send-key", "Send the typed key to the terminal program", send_key);
         c.register("term-paste", "Paste the clipboard into the terminal", |ed, _| paste(ed));
         c.register("term-view-mode", "Freeze the terminal to navigate it with editor keys", |ed, _| {
@@ -310,6 +420,16 @@ impl Plugin for TermPlugin {
         ed.hooks.on_buffer_killed(|ed, id| {
             if let Some(session) = session(ed, id) {
                 session.shutdown();
+            }
+        });
+        ed.hooks.on_quit(quitting);
+        // A deleted workspace's terminals end with it.
+        ed.hooks.on_restore_discarded(|ed, command, argument| {
+            let Ok(id) = argument.parse() else { return };
+            if command == "term" {
+                if let Ok(connection) = connection(ed, false) {
+                    connection.send(&ToHost::Kill { id });
+                }
             }
         });
     }

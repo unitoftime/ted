@@ -1,11 +1,12 @@
-//! Sessions: the buffers, windows and saved window layouts the editor shows, as plain data
-//! that outlives the process. `reload-ted` writes one and has the frontend start ted again
-//! from its binary on it: how a rebuilt ted picks up where the old one left off.
+//! Sessions: a workspace's buffers, windows and saved window layouts as plain data that
+//! outlives the process. Named workspaces are saved as sessions (see `workspace`), and
+//! `reload-ted` writes every loaded workspace to one file and has the frontend start ted
+//! again from its binary on it: how a rebuilt ted picks up where the old one left off.
 //!
-//! File buffers are visited again and `*scratch*` keeps its text. Generated buffers whose
-//! mode names a `restore` command (dired, git status, terminals) are recreated by running
-//! it from their working directory; other generated buffers are left out, and windows that
-//! showed them show `*scratch*`.
+//! File buffers are visited again. Generated buffers whose mode names a `restore` command
+//! (dired, git status, terminals) are recreated by running it from their working
+//! directory, with their restore argument if they have one (the terminal to reattach);
+//! other generated buffers are left out, and windows that showed them show `*scratch*`. The scratch text belongs to no workspace: only a restart carries it over.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -14,37 +15,58 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::buffer::{Buffer, BufferId, Buffers};
+use crate::command::Arg;
 use crate::commands::files::save_some_buffers;
 use crate::editor::Editor;
 use crate::layout::{Layout, SplitType, Tile};
 use crate::settings;
 use crate::view::{Cursor, View};
+use crate::workspace::{self, WindowsRef, Workspace};
 
 /// First line of a session file. Another format (from another build) is refused whole.
-const HEADER: &str = "ted-session 1";
+const HEADER: &str = "ted-session 2";
 
 /// `reload-ted`: once every modified file is saved or knowingly left unsaved, writes the
 /// session and stops the editor with `restart` set, for the frontend to start ted on it.
 pub fn request_restart(ed: &mut Editor) {
     save_some_buffers(ed, |ed| {
         let path = handoff_path();
-        match Session::capture(ed).write(&path) {
+        match write_handoff(ed, &path) {
             Ok(()) => {
                 ed.restart = Some(path);
-                ed.running = false;
+                ed.quit();
             }
             Err(e) => ed.set_status(format!("Cannot save the session to {}: {}", path.display(), e)),
         }
     });
 }
 
-/// Restores the session a restarting ted left at `path`, then deletes the file.
+/// Writes the scratch text and every loaded workspace, the active one first, to `path`.
+pub fn write_handoff(ed: &Editor, path: &Path) -> io::Result<()> {
+    let scratch = ed.buffers.find(Buffer::is_scratch).map(|id| ed.buffers[id].text().to_string());
+    let sessions: Vec<Session> = ed
+        .workspaces
+        .with_windows((&ed.layout, &ed.saved_layouts))
+        .map(|(ws, windows)| Session::capture(ws, windows, &ed.buffers))
+        .collect();
+    fs::write(path, to_text(scratch.as_deref(), &sessions))
+}
+
+/// Restores the workspaces a restarting ted left at `path`, then deletes the file.
 pub fn resume(ed: &mut Editor, path: &Path) {
-    let session = Session::read(path);
+    let text = fs::read_to_string(path);
     let _ = fs::remove_file(path);
-    match session {
-        Ok(session) => session.restore(ed),
-        Err(e) => ed.set_status(format!("Cannot restore the session: {}", e)),
+    let Some((scratch, sessions)) = text.ok().as_deref().and_then(parse) else {
+        return ed.set_status("Cannot restore the session");
+    };
+    // The active workspace, first, is restored last so it ends up active.
+    for session in sessions.into_iter().rev() {
+        workspace::open(ed, session.name.clone(), session.root.clone());
+        session.restore(ed);
+    }
+    if let Some(text) = scratch {
+        let id = ed.ensure_scratch();
+        ed.buffers[id].set_text(&text);
     }
 }
 
@@ -55,7 +77,11 @@ fn handoff_path() -> PathBuf {
     dir.join(format!("ted-session-{}", std::process::id()))
 }
 
+/// One workspace, saved.
 pub struct Session {
+    pub name: Option<String>,
+    pub root: PathBuf,
+    /// Most recently shown first.
     buffers: Vec<SavedBuffer>,
     layout: SavedLayout,
     /// `save-window-layout` slots, by slot number.
@@ -64,14 +90,17 @@ pub struct Session {
 
 enum SavedBuffer {
     File(PathBuf),
-    Scratch(String),
-    /// A generated buffer, recreated by running `command` from `directory`.
+    Scratch,
+    /// A generated buffer, recreated by running `command` from `directory`, with
+    /// `argument` if it has one.
     Generated {
         command: String,
         directory: PathBuf,
+        argument: Option<String>,
     },
 }
 
+#[derive(Default)]
 struct SavedLayout {
     tiles: Vec<Tile<SavedView>>,
     /// Which leaf is active, counted in pre-order.
@@ -89,26 +118,38 @@ struct SavedView {
 }
 
 impl Session {
-    pub fn capture(ed: &Editor) -> Session {
+    pub fn capture(ws: &Workspace, (layout, slots): WindowsRef, buffers: &Buffers) -> Session {
         let mut index = HashMap::new();
-        let mut buffers = Vec::new();
-        for (id, buf) in ed.buffers.iter() {
+        let mut saved_buffers = Vec::new();
+        for &id in ws.buffers() {
+            let buf = &buffers[id];
             let saved = match (&buf.mode().restore, buf.path()) {
-                (Some(command), _) => SavedBuffer::Generated { command: command.clone(), directory: buf.directory() },
+                (Some(command), _) => SavedBuffer::Generated {
+                    command: command.clone(),
+                    directory: buf.directory(),
+                    argument: buf.restore_argument().map(str::to_string),
+                },
                 (None, Some(path)) => SavedBuffer::File(path.to_path_buf()),
-                (None, None) if buf.is_scratch() => SavedBuffer::Scratch(buf.text().to_string()),
+                (None, None) if buf.is_scratch() => SavedBuffer::Scratch,
                 (None, None) => continue,
             };
-            index.insert(id, buffers.len());
-            buffers.push(saved);
+            index.insert(id, saved_buffers.len());
+            saved_buffers.push(saved);
         }
         let mut slots: Vec<_> =
-            ed.saved_layouts.iter().map(|(&slot, layout)| (slot, SavedLayout::capture(layout, &index))).collect();
+            slots.iter().map(|(&slot, layout)| (slot, SavedLayout::capture(layout, &index))).collect();
         slots.sort_unstable_by_key(|&(slot, _)| slot);
-        Session { buffers, layout: SavedLayout::capture(&ed.layout, &index), slots }
+        Session {
+            name: ws.name.clone(),
+            root: ws.root.clone(),
+            buffers: saved_buffers,
+            layout: SavedLayout::capture(layout, &index),
+            slots,
+        }
     }
 
-    /// Opens the session's buffers and replaces the windows and layout slots with its own.
+    /// Opens the session's buffers into the active workspace and replaces its windows and
+    /// layout slots with the session's.
     pub fn restore(self, ed: &mut Editor) {
         let scratch = ed.ensure_scratch();
         // What a generated buffer's command runs from: a buffer in its saved directory.
@@ -117,15 +158,12 @@ impl Session {
         for saved in &self.buffers {
             let id = match saved {
                 SavedBuffer::File(path) => path.exists().then(|| ed.visit_file(path).ok()).flatten(),
-                SavedBuffer::Scratch(text) => {
-                    ed.buffers[scratch].set_text(text);
-                    Some(scratch)
-                }
-                SavedBuffer::Generated { command, directory } => {
+                SavedBuffer::Scratch => Some(scratch),
+                SavedBuffer::Generated { command, directory, argument } => {
                     let stage = *staging.get_or_insert_with(|| ed.add_buffer(Buffer::new("*restoring*", "")));
                     ed.buffers[stage].set_directory(directory);
                     ed.show_in_active_view(stage);
-                    ed.execute(command);
+                    ed.execute_with(command, argument.as_deref().map_or(Arg::None, Arg::parse));
                     Some(ed.active_buffer_id()).filter(|&id| id != stage)
                 }
             };
@@ -144,82 +182,134 @@ impl Session {
         if let Some(stage) = staging {
             ed.kill_buffer(stage);
         }
+        ed.workspaces.active_mut().adopt(&ids);
         ed.set_status("Restored session");
     }
 
-    pub fn write(&self, path: &Path) -> io::Result<()> {
-        fs::write(path, self.to_text())
+    /// The restore command and argument of each saved generated buffer that has one.
+    pub fn restore_arguments(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.buffers.iter().filter_map(|saved| match saved {
+            SavedBuffer::Generated { command, argument: Some(argument), .. } => {
+                Some((command.as_str(), argument.as_str()))
+            }
+            _ => None,
+        })
     }
 
+    /// Writes the session alone, as a workspace's file.
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        fs::write(path, to_text(None, std::slice::from_ref(self)))
+    }
+
+    /// Reads a workspace's file.
     pub fn read(path: &Path) -> io::Result<Session> {
         let text = fs::read_to_string(path)?;
-        Self::parse(&text).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not a session this ted can read"))
+        match parse(&text) {
+            Some((None, sessions)) if sessions.len() == 1 => Ok(sessions.into_iter().next().expect("one session")),
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "not a workspace this ted can read")),
+        }
     }
 
-    /// One line per record: the buffers, then each layout's header followed by its tiles.
-    fn to_text(&self) -> String {
-        let mut out = format!("{HEADER}\n");
+    /// The workspace's header, its buffers, then each layout's header followed by its tiles.
+    fn write_text(&self, out: &mut String) {
+        let _ = writeln!(out, "workspace {}", escape(self.name.as_deref().unwrap_or_default()));
+        let _ = writeln!(out, "root {}", escape(&self.root.to_string_lossy()));
         for buffer in &self.buffers {
             let _ = match buffer {
                 SavedBuffer::File(path) => writeln!(out, "file {}", escape(&path.to_string_lossy())),
-                SavedBuffer::Scratch(text) => writeln!(out, "scratch {}", escape(text)),
-                SavedBuffer::Generated { command, directory } => {
-                    writeln!(out, "generated {} {}", command, escape(&directory.to_string_lossy()))
+                SavedBuffer::Scratch => writeln!(out, "scratch"),
+                SavedBuffer::Generated { command, directory, argument } => {
+                    let _ = writeln!(out, "generated {} {}", command, escape(&directory.to_string_lossy()));
+                    match argument {
+                        Some(argument) => writeln!(out, "argument {}", escape(argument)),
+                        None => Ok(()),
+                    }
                 }
             };
         }
         let _ = writeln!(out, "layout {}", self.layout.active);
-        self.layout.write_tiles(&mut out);
+        self.layout.write_tiles(out);
         for (slot, layout) in &self.slots {
             let _ = writeln!(out, "slot {} {}", slot, layout.active);
-            layout.write_tiles(&mut out);
+            layout.write_tiles(out);
         }
-        out
     }
+}
 
-    fn parse(text: &str) -> Option<Session> {
-        let mut lines = text.lines();
-        if lines.next()? != HEADER {
-            return None;
-        }
-        let mut buffers = Vec::new();
-        // In file order: the window layout (no slot) and the slots; tiles add to the last.
-        let mut layouts: Vec<(Option<usize>, SavedLayout)> = Vec::new();
-        for line in lines {
-            let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
-            match kind {
-                "file" => buffers.push(SavedBuffer::File(unescape(rest).into())),
-                "scratch" => buffers.push(SavedBuffer::Scratch(unescape(rest))),
-                "generated" => {
-                    let (command, directory) = rest.split_once(' ')?;
-                    buffers.push(SavedBuffer::Generated {
-                        command: command.to_string(),
-                        directory: unescape(directory).into(),
-                    });
-                }
-                "layout" => layouts.push((None, SavedLayout { tiles: Vec::new(), active: rest.parse().ok()? })),
-                "slot" => {
-                    let (slot, active) = rest.split_once(' ')?;
-                    layouts.push((
-                        Some(slot.parse().ok()?),
-                        SavedLayout { tiles: Vec::new(), active: active.parse().ok()? },
-                    ));
-                }
-                "split" => layouts.last_mut()?.1.tiles.push(parse_split(rest)?),
-                "view" => layouts.last_mut()?.1.tiles.push(Tile::Leaf(parse_view(rest)?)),
-                _ => return None,
-            }
-        }
-        let mut slots = Vec::new();
-        let mut layout = None;
-        for (slot, saved) in layouts {
-            match slot {
-                Some(slot) => slots.push((slot, saved)),
-                None => layout = Some(saved),
-            }
-        }
-        Some(Session { buffers, layout: layout?, slots })
+/// One line per record: the scratch text if given, then each session.
+fn to_text(scratch: Option<&str>, sessions: &[Session]) -> String {
+    let mut out = format!("{HEADER}\n");
+    if let Some(text) = scratch {
+        let _ = writeln!(out, "scratch-text {}", escape(text));
     }
+    for session in sessions {
+        session.write_text(&mut out);
+    }
+    out
+}
+
+/// The scratch text and sessions `to_text` wrote.
+fn parse(text: &str) -> Option<(Option<String>, Vec<Session>)> {
+    let mut lines = text.lines();
+    if lines.next()? != HEADER {
+        return None;
+    }
+    let mut scratch = None;
+    let mut sessions: Vec<Session> = Vec::new();
+    // Whether tiles go to the last slot rather than the window layout.
+    let mut in_slot = false;
+    for line in lines {
+        let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
+        match kind {
+            "scratch-text" => scratch = Some(unescape(rest)),
+            "workspace" => {
+                let name = Some(unescape(rest)).filter(|name| !name.is_empty());
+                let (buffers, layout, slots) = (Vec::new(), SavedLayout::default(), Vec::new());
+                sessions.push(Session { name, root: PathBuf::new(), buffers, layout, slots });
+                in_slot = false;
+            }
+            _ => {
+                let session = sessions.last_mut()?;
+                match kind {
+                    "root" => session.root = unescape(rest).into(),
+                    "file" => session.buffers.push(SavedBuffer::File(unescape(rest).into())),
+                    "scratch" => session.buffers.push(SavedBuffer::Scratch),
+                    "generated" => {
+                        let (command, directory) = rest.split_once(' ')?;
+                        session.buffers.push(SavedBuffer::Generated {
+                            command: command.to_string(),
+                            directory: unescape(directory).into(),
+                            argument: None,
+                        });
+                    }
+                    "argument" => match session.buffers.last_mut()? {
+                        SavedBuffer::Generated { argument, .. } => *argument = Some(unescape(rest)),
+                        _ => return None,
+                    },
+                    "layout" => {
+                        session.layout = SavedLayout { tiles: Vec::new(), active: rest.parse().ok()? };
+                        in_slot = false;
+                    }
+                    "slot" => {
+                        let (slot, active) = rest.split_once(' ')?;
+                        let layout = SavedLayout { tiles: Vec::new(), active: active.parse().ok()? };
+                        session.slots.push((slot.parse().ok()?, layout));
+                        in_slot = true;
+                    }
+                    "split" | "view" => {
+                        let tile = match kind {
+                            "split" => parse_split(rest)?,
+                            _ => Tile::Leaf(parse_view(rest)?),
+                        };
+                        let layout = if in_slot { &mut session.slots.last_mut()?.1 } else { &mut session.layout };
+                        layout.tiles.push(tile);
+                    }
+                    _ => return None,
+                }
+            }
+        }
+    }
+    sessions.iter().all(|s| s.root.is_absolute()).then_some((scratch, sessions))
 }
 
 impl SavedLayout {

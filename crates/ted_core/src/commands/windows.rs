@@ -48,13 +48,9 @@ pub fn register(ed: &mut Editor) {
             return;
         }
         ed.remember_places();
-        let Editor { layout, buffers, saved_layouts, .. } = ed;
-        layout.restore(&saved_layouts[&slot]);
+        ed.layout.restore(&ed.saved_layouts[&slot]);
         // Buffers may have shrunk since the layout was saved.
-        for view in layout.views_mut() {
-            let buffer = &buffers[view.buffer];
-            view.clamp(buffer.len_chars(), buffer.len_lines());
-        }
+        ed.clamp_layout();
         ed.set_status(format!("Loaded layout from slot {}", slot));
     });
 

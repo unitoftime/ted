@@ -31,6 +31,7 @@ pub(crate) fn register_builtin(ed: &mut Editor) {
     crate::locations::register(ed);
     crate::xref::register(ed);
     crate::project::register(ed);
+    crate::workspace::register(ed);
     crate::completion::register(ed);
     crate::format::register(ed);
 }

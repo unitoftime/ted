@@ -52,6 +52,9 @@ pub struct Buffer {
     path: Option<PathBuf>,
     /// Working directory of a buffer without a file, set by whatever generated it.
     directory: Option<PathBuf>,
+    /// What the mode's `restore` command needs besides the directory to bring the buffer
+    /// back (which terminal it shows).
+    restore_argument: Option<String>,
     mode: Arc<Mode>,
     /// The editor's indentation settings, used where the mode has none of its own (kept
     /// current by `Buffers`).
@@ -108,6 +111,7 @@ impl Buffer {
             name: name.into(),
             path: None,
             directory: None,
+            restore_argument: None,
             mode: Mode::fundamental(),
             default_indentation: Indentation::default(),
             read_only: false,
@@ -193,6 +197,15 @@ impl Buffer {
     /// Sets the working directory used while the buffer visits no file.
     pub fn set_directory(&mut self, dir: impl Into<PathBuf>) {
         self.directory = Some(dir.into());
+    }
+
+    /// What the mode's `restore` command is given to bring the buffer back.
+    pub fn restore_argument(&self) -> Option<&str> {
+        self.restore_argument.as_deref()
+    }
+
+    pub fn set_restore_argument(&mut self, argument: Option<String>) {
+        self.restore_argument = argument;
     }
 
     /// Where a window showing the buffer should start (see `Place`).

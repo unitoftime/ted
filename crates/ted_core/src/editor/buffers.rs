@@ -131,15 +131,30 @@ impl Editor {
         match visible {
             Some(view) => {
                 self.layout.set_active(view);
+                self.workspaces.touch(id);
             }
             None => self.show_in_active_view(id),
         }
     }
 
-    /// Shows `id` in the active view, where a view last left it.
+    /// Shows `id` in the active view, where a view last left it. The buffer joins the
+    /// active workspace.
     pub fn show_in_active_view(&mut self, id: BufferId) {
         let Editor { layout, buffers, .. } = self;
         layout.active_mut().set_buffer(buffers, id);
+        if self.workspaces.touch(id) {
+            crate::workspace::schedule_save(self);
+        }
+    }
+
+    /// Keeps every view's cursor inside its buffer, for a layout put back in place after
+    /// the buffers may have shrunk.
+    pub fn clamp_layout(&mut self) {
+        let Editor { layout, buffers, .. } = self;
+        for view in layout.views_mut() {
+            let buffer = &buffers[view.buffer];
+            view.clamp(buffer.len_chars(), buffer.len_lines());
+        }
     }
 
     /// Leaves every view's position in its buffer, for when views close or the layout is
@@ -262,27 +277,28 @@ impl Editor {
             self.ext_mut::<FilePlaces>().0.insert(path, place);
         }
         self.buffers.remove(id);
-        let last = self.buffers.iter().next_back().map(|(other, _)| other);
-        let replacement = match last {
-            Some(other) => other,
-            None => self.ensure_scratch(),
-        };
-        let buffers = &mut self.buffers;
-        for view in self.layout.views_mut() {
-            view.forget(id);
-            if view.buffer == id {
-                view.go_back(buffers, replacement);
-            }
-        }
-        for saved in self.saved_layouts.values_mut() {
-            for view in saved.views_mut() {
+        self.workspaces.forget(id);
+        let scratch = self.ensure_scratch();
+        // Each workspace's windows fall back on the buffer it showed last.
+        let Editor { layout, saved_layouts, buffers, workspaces, .. } = self;
+        for (shown, (layout, slots)) in workspaces.windows_mut((layout, saved_layouts)) {
+            let replacement = shown.first().copied().unwrap_or(scratch);
+            for view in layout.views_mut() {
                 view.forget(id);
                 if view.buffer == id {
-                    view.set_buffer(buffers, replacement);
+                    view.go_back(buffers, replacement);
+                }
+            }
+            for saved in slots.values_mut() {
+                for view in saved.views_mut() {
+                    view.forget(id);
+                    if view.buffer == id {
+                        view.set_buffer(buffers, replacement);
+                    }
                 }
             }
         }
-        self.ensure_scratch();
+        crate::workspace::schedule_save(self);
         self.set_status(format!("Killed buffer {}", name));
     }
 
@@ -298,7 +314,7 @@ impl Editor {
     /// Exits once every modified file is saved or knowingly left unsaved: how the window
     /// manager's close button and closing the last window end the session.
     pub fn request_exit(&mut self) {
-        crate::commands::files::save_some_buffers(self, |ed| ed.running = false);
+        crate::commands::files::save_some_buffers(self, Editor::quit);
     }
 
     /// Checks every buffer against its file on disk; see `commands::external_changes`.

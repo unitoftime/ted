@@ -30,6 +30,7 @@ use crate::settings::{self, Settings, Value};
 use crate::theme::Theme;
 use crate::ui::{InputHistory, Modal};
 use crate::view::{View, ViewId};
+use crate::workspace::Workspaces;
 
 pub use buffers::BufferScope;
 
@@ -43,6 +44,8 @@ pub struct StartupOptions {
     pub init_script: Option<PathBuf>,
     pub recent_files: Option<PathBuf>,
     pub input_history: Option<PathBuf>,
+    /// Where named workspaces are saved; `None` keeps them in memory only.
+    pub workspaces: Option<PathBuf>,
     pub plugins: Vec<Box<dyn Plugin>>,
 }
 
@@ -52,6 +55,7 @@ impl StartupOptions {
             init_script: config::default_init_script(),
             recent_files: RecentFiles::default_save_path(),
             input_history: InputHistory::default_save_path(),
+            workspaces: Workspaces::default_save_dir(),
             plugins: Vec::new(),
         }
     }
@@ -71,6 +75,9 @@ pub struct Editor {
     pub buffers: Buffers,
     pub layout: Layout,
     pub saved_layouts: HashMap<usize, Layout>,
+    /// The active workspace (whose windows are `layout` and `saved_layouts`) and the ones
+    /// loaded in the background.
+    pub workspaces: Workspaces,
     pub commands: Commands,
     pub keymaps: Keymaps,
     pub modes: ModeRegistry,
@@ -117,6 +124,7 @@ impl Editor {
             settings,
             buffers,
             saved_layouts: HashMap::new(),
+            workspaces: Workspaces::new(options.workspaces, crate::text::absolutize(".")),
             commands: Commands::default(),
             keymaps: Keymaps::default(),
             modes: ModeRegistry::default(),
@@ -414,6 +422,23 @@ impl Editor {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+    }
+
+    /// What the OS window is titled: the active workspace's name.
+    pub fn title(&self) -> String {
+        match &self.workspaces.active().name {
+            Some(name) => format!("{} - ted", name),
+            None => "ted".to_string(),
+        }
+    }
+
+    /// Stops the editor, running the `quit` hooks and saving the named workspaces first.
+    pub fn quit(&mut self) {
+        for hook in self.hooks.quit.clone() {
+            hook(self);
+        }
+        crate::workspace::save_all(self);
+        self.running = false;
     }
 
     // ---------------------------------------------------------------------------------

@@ -8,7 +8,8 @@ use ted_core::view::{BufferRenderer, RenderCtx, WIDE_CONTINUATION};
 use ted_core::FaceId;
 
 use crate::palette::{color, rgb, Palette};
-use crate::session::{TermHandle, TermSize};
+use crate::protocol::Size;
+use crate::session::TermHandle;
 
 pub struct TermRenderer {
     pub handle: TermHandle,
@@ -29,11 +30,13 @@ const STYLE_FLAGS: Flags = Flags::BOLD.union(Flags::ITALIC).union(Flags::ALL_UND
 impl BufferRenderer for TermRenderer {
     fn render(&mut self, frame: &mut Frame, area: Rect, focused: bool, cx: &RenderCtx) {
         let m = cx.metrics;
-        let size = TermSize {
-            cols: ((area.w / m.char_w).floor() as usize).max(1),
-            lines: ((area.h / m.line_h).floor() as usize).max(1),
+        let size = Size {
+            cols: ((area.w / m.char_w).floor() as u16).max(1),
+            lines: ((area.h / m.line_h).floor() as u16).max(1),
+            cell_width: m.char_w as u16,
+            cell_height: m.line_h as u16,
         };
-        self.handle.resize(size, (m.char_w, m.line_h));
+        self.handle.resize(size);
 
         let palette = Palette::from_faces(cx.faces);
         frame.fill_rect(area, color(palette.bg));
@@ -66,7 +69,7 @@ impl BufferRenderer for TermRenderer {
         let mut run: Option<Run> = None;
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + offset;
-            if row < 0 || row as usize >= size.lines {
+            if row < 0 || row as usize >= size.lines as usize {
                 continue;
             }
             let (row, col) = (row as usize, indexed.point.column.0);
@@ -102,7 +105,7 @@ impl BufferRenderer for TermRenderer {
         if content.mode.contains(TermMode::SHOW_CURSOR)
             && cursor.shape != CursorShape::Hidden
             && row >= 0
-            && (row as usize) < size.lines
+            && (row as usize) < size.lines as usize
         {
             let x = area.x + cursor.point.column.0 as f32 * m.char_w;
             let y = area.y + row as f32 * m.line_h;

@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 alacritty_terminal = "0.26.0"
+polling = "3.8.0"
 ted_core = { path = "../ted_core" }

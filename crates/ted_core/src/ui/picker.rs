@@ -321,6 +321,12 @@ impl Picker {
         self.filtered().get(self.selected).map(|&i| &self.items[i])
     }
 
+    /// What the selected item stands for, if the picker was made with values of type `T`.
+    pub fn selected_value<T: 'static>(&self) -> Option<&T> {
+        let &index = self.filtered().get(self.selected)?;
+        self.values.downcast_ref::<Vec<T>>()?.get(index)
+    }
+
     /// Moves the selection by `delta`, wrapping when `wrap` is set, clamping otherwise.
     pub fn move_selection(&mut self, delta: isize, wrap: bool) {
         let n = self.filtered().len();

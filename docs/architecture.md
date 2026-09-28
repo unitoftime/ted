@@ -13,6 +13,11 @@ ted_gui ──┼──> ted_lsp ──┼──> ted_core
   rendering to a display list. No windowing or platform code.
 - **`ted_git`, `ted_lsp`, `ted_term`**: the git client, language server client and terminal.
   They are plugins built only on `ted_core`'s public API, which keeps that API honest.
+- **Terminal host**: `ted --term-host`, the same binary run by `ted_term` in the
+  background when a terminal is first needed. It owns terminals' programs and their
+  screens, so they outlive ted as tmux's do; ted keeps a copy of each attached terminal's
+  emulator, fed the host's output over a Unix socket. It exits once no terminal or ted is
+  left.
 - **`ted_gui`**: a thin frontend. It turns window events into keys and mouse input, and
   rasterizes the frames the core produces.
 
@@ -22,6 +27,7 @@ ted_gui ──┼──> ted_lsp ──┼──> ted_core
 |---|---|
 | Buffer | Text (a rope), its file, mode, undo tree and syntax tree, and the `Place` the last view to leave it was at. Plain data, addressed by `BufferId`. |
 | View | A window onto a buffer: cursor, scroll, wrapping. Showing a buffer starts at its place. Views are the leaves of the split `Layout`. |
+| Workspace | A named set of windows, layout slots and the buffers they have shown, anchored at a root directory. One is active; the others stay loaded in the background, and named ones are saved as sessions. |
 | Doc | A view and its buffer borrowed together. Motion and editing primitives live here. |
 | Command | Every user-facing action is a named command, whether built in or from a plugin. |
 | Keymap | A trie of key sequences to commands. Keymaps have parents and stack in layers. Every keymap, built in or from a plugin, is declared the same way, as data (`KeymapDef`). |

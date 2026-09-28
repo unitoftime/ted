@@ -158,6 +158,10 @@ const PICKER: &[(&str, &str)] = &[
 
 const FILE_SEARCH: &[(&str, &str)] = &[("C-s", "file-search-toggle-scope")];
 
+/// The workspace switcher's management keys, which its title lists.
+const WORKSPACE_SWITCH: &[(&str, &str)] =
+    &[("M-n", "workspace-new"), ("M-r", "workspace-rename"), ("M-u", "workspace-unload"), ("M-d", "workspace-delete")];
+
 /// The completion popup. Other keys close it and then act as usual (word characters type
 /// on, narrowing the candidates).
 const COMPLETION: &[(&str, &str)] = &[
@@ -230,6 +234,7 @@ pub(crate) fn install_defaults(ed: &mut Editor) {
         KeymapDef::new("search").parent("input").fallback("search-exit-and-replay").keys(SEARCH),
         KeymapDef::new("picker").parent("input").keys(PICKER),
         KeymapDef::new("file-search").parent("picker").keys(FILE_SEARCH),
+        KeymapDef::new("workspace-switch").parent("picker").keys(WORKSPACE_SWITCH),
         modal("choice").self_insert("choice-select").keys(CHOICE),
         modal("menu").self_insert("menu-select").keys(MENU),
         modal("undo-tree").keys(UNDO_TREE),

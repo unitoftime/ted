@@ -15,6 +15,7 @@
 //! - Definitions, completion and formatting ask chains of backends (`chain`): language
 //!   servers first, built-in fallbacks after.
 //! - Outside programs start through `process::Program`.
+//! - Workspaces group windows and buffers at a root directory; one is active at a time.
 //! - Plugins extend all of the above through `Editor`; users rebind via `init.rhai`.
 
 pub mod brackets;
@@ -54,6 +55,7 @@ pub mod theme;
 pub mod ui;
 pub mod view;
 pub mod watch;
+pub mod workspace;
 pub mod xref;
 
 pub use buffer::{Buffer, BufferId, Buffers, Decoration, Edit, Margin, Place, StyledText};

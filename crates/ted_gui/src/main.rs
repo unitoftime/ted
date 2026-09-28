@@ -47,7 +47,15 @@ impl ClickCounter {
 const RESTORE_SESSION: &str = "--restore-session";
 
 fn main() {
-    let (initial_files, session) = parse_args();
+    let (initial_files, session) = match parse_args() {
+        Launch::Editor { files, session } => (files, session),
+        Launch::TermHost(socket) => {
+            if let Err(e) = ted_term::host::run(&socket) {
+                eprintln!("ted: cannot run the terminal host: {}", e);
+            }
+            return;
+        }
+    };
     // A restart inherits the environment its predecessor already imported.
     if session.is_none() {
         shell_env::import_if_launched_from_desktop();
@@ -67,8 +75,13 @@ fn main() {
             .expect("Failed to create window"),
     );
 
+    // Terminals run in the terminal host, this binary started with `--term-host`.
+    let term = match &exe {
+        Ok(exe) => ted_term::TermPlugin::default().persistent(exe.clone()),
+        Err(_) => ted_term::TermPlugin::default(),
+    };
     let plugins: Vec<Box<dyn ted_core::Plugin>> =
-        vec![Box::new(ted_git::GitPlugin), Box::new(ted_term::TermPlugin::default()), Box::new(ted_lsp::LspPlugin)];
+        vec![Box::new(ted_git::GitPlugin), Box::new(term), Box::new(ted_lsp::LspPlugin)];
     let options = StartupOptions { plugins, ..StartupOptions::user() };
     let mut editor = Editor::with_options(&initial_files, options);
     // Background jobs wake the event loop when they have results.
@@ -93,6 +106,7 @@ fn main() {
     renderer.resize(width, height);
     let mut restart = None;
     let restart_to = &mut restart;
+    let mut title = String::new();
 
     event_loop
         .run(move |event, target| {
@@ -179,6 +193,11 @@ fn main() {
             if !editor.running {
                 target.exit();
             } else if redraw {
+                let now = editor.title();
+                if now != title {
+                    window.set_title(&now);
+                    title = now;
+                }
                 window.request_redraw();
             }
         })
@@ -194,16 +213,26 @@ fn main() {
     }
 }
 
-/// The files to open, and the session to restore instead when restarting.
-fn parse_args() -> (Vec<PathBuf>, Option<PathBuf>) {
+/// What the command line asks the process to be.
+enum Launch {
+    /// The editor, with the files to open, and the session to restore instead when
+    /// restarting.
+    Editor { files: Vec<PathBuf>, session: Option<PathBuf> },
+    /// The terminal host, listening on the socket.
+    TermHost(PathBuf),
+}
+
+fn parse_args() -> Launch {
     let (mut files, mut session) = (Vec::new(), None);
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
-        if arg == RESTORE_SESSION {
+        if arg == ted_term::host::FLAG {
+            return Launch::TermHost(args.next().map(PathBuf::from).unwrap_or_default());
+        } else if arg == RESTORE_SESSION {
             session = args.next().map(PathBuf::from);
         } else {
             files.push(PathBuf::from(arg));
         }
     }
-    (files, session)
+    Launch::Editor { files, session }
 }

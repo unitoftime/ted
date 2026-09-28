@@ -69,6 +69,8 @@ pub trait Plugin: 'static {
 
 pub type BufferHook = Rc<dyn Fn(&mut Editor, BufferId)>;
 pub type EditorHook = Rc<dyn Fn(&mut Editor)>;
+/// Gets a saved generated buffer's restore command and argument.
+pub type RestoreHook = Rc<dyn Fn(&mut Editor, &str, &str)>;
 /// Runs before a buffer is written, and may change it first. The save waits until the
 /// hook calls `done` on the token, now or later (from a job's reply), but only so long:
 /// a hook that takes too long is skipped.
@@ -94,6 +96,8 @@ pub struct Hooks {
     pub(crate) buffer_saved: Vec<BufferHook>,
     pub(crate) buffer_killed: Vec<BufferHook>,
     pub(crate) post_command: Vec<EditorHook>,
+    pub(crate) quit: Vec<EditorHook>,
+    pub(crate) restore_discarded: Vec<RestoreHook>,
 }
 
 impl Hooks {
@@ -120,5 +124,17 @@ impl Hooks {
     /// Runs after every command dispatched from a key or M-x.
     pub fn on_post_command(&mut self, hook: impl Fn(&mut Editor) + 'static) {
         self.post_command.push(Rc::new(hook));
+    }
+
+    /// Runs as the editor stops, to exit or to restart (`Editor::restart` is set).
+    pub fn on_quit(&mut self, hook: impl Fn(&mut Editor) + 'static) {
+        self.quit.push(Rc::new(hook));
+    }
+
+    /// A saved generated buffer with a restore argument will never be restored: its
+    /// workspace was deleted without being loaded. Gets the restore command and argument,
+    /// to release what the argument holds on to (a terminal).
+    pub fn on_restore_discarded(&mut self, hook: impl Fn(&mut Editor, &str, &str) + 'static) {
+        self.restore_discarded.push(Rc::new(hook));
     }
 }

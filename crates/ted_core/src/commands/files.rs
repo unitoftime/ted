@@ -59,7 +59,7 @@ pub fn register(ed: &mut Editor) {
         if modified_files(ed).is_empty() {
             ed.confirm("exit", "Are you sure you want to exit ted? (y/n) ", |ed, yes| {
                 if yes {
-                    ed.running = false;
+                    ed.quit();
                 } else {
                     ed.set_status("Canceled exit");
                 }
@@ -75,7 +75,13 @@ pub fn register(ed: &mut Editor) {
 }
 
 fn modified_files(ed: &Editor) -> Vec<BufferId> {
-    ed.buffers.iter().filter(|(_, b)| b.path().is_some() && b.is_dirty()).map(|(id, _)| id).collect()
+    modified(ed, ed.buffers.ids())
+}
+
+/// The file buffers among `ids` with unsaved changes.
+fn modified(ed: &Editor, mut ids: Vec<BufferId>) -> Vec<BufferId> {
+    ids.retain(|&id| ed.buffers.get(id).is_some_and(|b| b.path().is_some() && b.is_dirty()));
+    ids
 }
 
 type Continuation = Box<dyn FnOnce(&mut Editor)>;
@@ -84,7 +90,12 @@ type Continuation = Box<dyn FnOnce(&mut Editor)>;
 /// and all the rest, (q)uit. Runs `then` once every buffer is answered, unless the user
 /// quit or a save failed.
 pub fn save_some_buffers(ed: &mut Editor, then: impl FnOnce(&mut Editor) + 'static) {
-    let pending = modified_files(ed);
+    offer_to_save(ed, ed.buffers.ids(), then);
+}
+
+/// As `save_some_buffers`, asking only about the modified files among `ids`.
+pub fn offer_to_save(ed: &mut Editor, ids: Vec<BufferId>, then: impl FnOnce(&mut Editor) + 'static) {
+    let pending = modified(ed, ids);
     ask_to_save(ed, pending, Box::new(then));
 }
 
@@ -231,16 +242,20 @@ enum Target {
     File(PathBuf),
 }
 
-/// Open buffers, then (in a git project) the project's other files, nearest to the active
-/// buffer's directory first. Paths inside the project show relative to its root.
+/// The active workspace's buffers, most recently shown first, then (in a git project) the
+/// project's other files, nearest to the active buffer's directory first. Paths inside the
+/// project show relative to its root.
 fn buffer_switcher(ed: &mut Editor) {
-    ed.ensure_scratch();
+    let scratch = ed.ensure_scratch();
     let project = ed.project();
     let active = ed.active_buffer_id();
+    let mut ids = ed.workspaces.active().buffers().to_vec();
+    if !ids.contains(&scratch) {
+        ids.push(scratch);
+    }
     // Other buffers first so RET immediately switches away.
-    let mut ids = ed.buffers.ids();
     ids.sort_by_key(|&id| id == active);
-    let buffers = ids.into_iter().map(|id| {
+    let buffers = ids.iter().map(|&id| {
         let buf = &ed.buffers[id];
         let relative = buf.path().and_then(|p| p.strip_prefix(&project.root).ok());
         let subtitle = relative.map_or_else(|| ed.buffer_description(id), |p| p.display().to_string());
@@ -266,10 +281,9 @@ fn buffer_switcher(ed: &mut Editor) {
         ed.push_modal(picker);
         return;
     }
-    let open: HashSet<PathBuf> = ed
-        .buffers
+    let open: HashSet<PathBuf> = ids
         .iter()
-        .filter_map(|(_, b)| Some(b.path()?.strip_prefix(&project.root).ok()?.to_path_buf()))
+        .filter_map(|&id| Some(ed.buffers[id].path()?.strip_prefix(&project.root).ok()?.to_path_buf()))
         .collect();
     let here = ed.active_buffer().directory();
     let lists = ed.file_lists();

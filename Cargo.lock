@@ -2063,6 +2063,7 @@ name = "ted_term"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "polling",
  "ted_core",
 ]
 

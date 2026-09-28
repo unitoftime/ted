@@ -1,64 +1,45 @@
-//! A running terminal: the shell's PTY, the emulator state, and the bridge that turns the
-//! emulator's events into UI-thread work.
+//! A terminal as ted holds it: its id on the host (see `host`), ted's copy of its
+//! emulator, and the bridge that turns the copy's events into UI-thread work.
 
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{self, Term};
-use alacritty_terminal::tty;
 use ted_core::jobs::{JobContext, JobHandle};
 use ted_core::kill_ring::KillMode;
 use ted_core::process::Program;
 use ted_core::{BufferId, Editor};
 
+use crate::client::{Connection, Mirror};
 use crate::palette::Palette;
+use crate::protocol::{End, Size, Spawn, ToHost};
 
-/// Terminal size in cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TermSize {
-    pub cols: usize,
-    pub lines: usize,
-}
+/// A terminal's size until a window draws it.
+const INITIAL_SIZE: Size = Size { cols: 80, lines: 24, cell_width: 0, cell_height: 0 };
 
-impl Dimensions for TermSize {
-    fn total_lines(&self) -> usize {
-        self.lines
-    }
-    fn screen_lines(&self) -> usize {
-        self.lines
-    }
-    fn columns(&self) -> usize {
-        self.cols
-    }
-}
-
-impl TermSize {
-    fn window_size(self, cell: (f32, f32)) -> WindowSize {
-        WindowSize {
-            num_lines: self.lines as u16,
-            num_cols: self.cols as u16,
-            cell_width: cell.0 as u16,
-            cell_height: cell.1 as u16,
-        }
-    }
-}
-
-/// Receives emulator events on the PTY thread and forwards them to the UI thread.
+/// Receives the emulator copy's events on the connection's thread and forwards them to the
+/// UI thread. Answers to programs' queries come from the host, so the copy's are dropped.
 #[derive(Clone)]
 pub struct Listener {
     ctx: JobContext,
     buffer: BufferId,
     /// Set while a redraw is queued, so bursts of output wake the UI once.
     redraw_pending: Arc<AtomicBool>,
-    /// Writes replies (e.g. cursor position reports) straight back to the PTY.
-    writer: Arc<OnceLock<EventLoopSender>>,
+}
+
+impl Listener {
+    /// The terminal is no longer attached to this ted.
+    pub(crate) fn ended(&self, end: End) {
+        let id = self.buffer;
+        self.ctx.send(move |ed| crate::ended(ed, id, end));
+    }
 }
 
 impl EventListener for Listener {
@@ -69,11 +50,6 @@ impl EventListener for Listener {
                 if !self.redraw_pending.swap(true, Ordering::AcqRel) {
                     let pending = self.redraw_pending.clone();
                     self.ctx.send(move |_| pending.store(false, Ordering::Release));
-                }
-            }
-            Event::PtyWrite(text) => {
-                if let Some(writer) = self.writer.get() {
-                    let _ = writer.send(Msg::Input(text.into_bytes().into()));
                 }
             }
             Event::ClipboardStore(_, text) => {
@@ -95,45 +71,44 @@ impl EventListener for Listener {
             Event::TextAreaSizeRequest(format) => {
                 self.ctx.send(move |ed| {
                     if let Some(size) = session(ed, id).map(|s| s.handle.size()) {
-                        write(ed, id, format(size.window_size((0.0, 0.0))).into_bytes());
+                        write(ed, id, format(size.window_size()).into_bytes());
                     }
                 });
-            }
-            Event::ChildExit(status) => {
-                self.ctx.send(move |ed| crate::exited(ed, id, status.code()));
             }
             _ => {}
         }
     }
 }
 
-/// Shared access to a running terminal, held by both the session and its renderer.
+/// Shared access to an attached terminal, held by both the session and its renderer.
 #[derive(Clone)]
 pub struct TermHandle {
     pub term: Arc<FairMutex<Term<Listener>>>,
-    sender: EventLoopSender,
-    size: Rc<Cell<TermSize>>,
+    /// The terminal's id on the host.
+    pub id: u64,
+    connection: Rc<Connection>,
+    size: Rc<Cell<Size>>,
 }
 
 impl TermHandle {
-    pub fn size(&self) -> TermSize {
+    pub fn size(&self) -> Size {
         self.size.get()
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
         if !bytes.is_empty() {
-            let _ = self.sender.send(Msg::Input(bytes.into()));
+            self.connection.send(&ToHost::Input { id: self.id, bytes });
         }
     }
 
-    /// Resizes the emulator and the PTY (the program gets SIGWINCH).
-    pub fn resize(&self, size: TermSize, cell: (f32, f32)) {
+    /// Resizes the emulator here and on the host (the program gets SIGWINCH).
+    pub fn resize(&self, size: Size) {
         if size == self.size.get() || size.cols == 0 || size.lines == 0 {
             return;
         }
         self.size.set(size);
         self.term.lock().resize(size);
-        let _ = self.sender.send(Msg::Resize(size.window_size(cell)));
+        self.connection.send(&ToHost::Resize { id: self.id, size });
     }
 
     /// Jumps back to the live screen after scrolling the emulator's history.
@@ -145,7 +120,9 @@ impl TermHandle {
 pub struct Session {
     pub handle: TermHandle,
     job: JobHandle,
-    pub exited: bool,
+    /// Whether the terminal is no longer this ted's to end: its program exited, or another
+    /// ted attached it.
+    pub ended: bool,
 }
 
 /// Buffer-local slot holding a terminal buffer's session.
@@ -157,46 +134,72 @@ pub fn session(ed: &mut Editor, id: BufferId) -> Option<&mut Session> {
 }
 
 impl Session {
-    /// Starts `shell` (see `shell`) on a new terminal, reporting to terminal buffer `buffer`.
-    pub fn spawn(ed: &Editor, buffer: BufferId, shell: &Program) -> std::io::Result<Session> {
-        let size = TermSize { cols: 80, lines: 24 };
-        let (job, ctx) = ed.job_context();
-        let writer = Arc::new(OnceLock::new());
-        let listener =
-            Listener { ctx, buffer, redraw_pending: Arc::new(AtomicBool::new(false)), writer: writer.clone() };
+    /// Starts `shell` (see `shell`) on a new terminal keeping `scrollback` lines of
+    /// history, shown in terminal buffer `buffer`.
+    pub fn spawn(
+        ed: &Editor,
+        connection: Rc<Connection>,
+        buffer: BufferId,
+        shell: &Program,
+        scrollback: usize,
+    ) -> Session {
+        let session = Session::new(ed, connection, buffer, new_id(), scrollback);
+        let mut env: Vec<(String, String)> = std::env::vars().collect();
+        env.extend(shell.env.iter().cloned());
+        let (program, args) = without_flow_control(shell);
+        let spawn =
+            Spawn { program, args, dir: shell.dir.to_string_lossy().into_owned(), env, scrollback: scrollback as u32 };
+        let handle = &session.handle;
+        handle.connection.send(&ToHost::Create { id: handle.id, size: handle.size(), spawn });
+        session
+    }
 
-        let config = term::Config { kitty_keyboard: true, ..Default::default() };
-        let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
-        let options = tty::Options {
-            shell: Some(without_flow_control(shell)),
-            working_directory: Some(shell.dir.clone()),
-            drain_on_exit: true,
-            env: shell.env.iter().cloned().collect(),
-        };
-        let pty = tty::new(&options, size.window_size((0.0, 0.0)), buffer_window_id(buffer))?;
-        let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
-        let sender = event_loop.channel();
-        let _ = writer.set(sender.clone());
-        event_loop.spawn();
-        let handle = TermHandle { term, sender, size: Rc::new(Cell::new(size)) };
-        Ok(Session { handle, job, exited: false })
+    /// Attaches terminal `id`, which an earlier ted left running, to buffer `buffer`.
+    pub fn attach(ed: &Editor, connection: Rc<Connection>, buffer: BufferId, id: u64, scrollback: usize) -> Session {
+        let session = Session::new(ed, connection, buffer, id, scrollback);
+        let handle = &session.handle;
+        handle.connection.send(&ToHost::Attach { id, size: handle.size() });
+        session
+    }
+
+    /// The session of terminal `id`, receiving its output from now on.
+    fn new(ed: &Editor, connection: Rc<Connection>, buffer: BufferId, id: u64, scrollback: usize) -> Session {
+        let (job, ctx) = ed.job_context();
+        let listener = Listener { ctx, buffer, redraw_pending: Arc::new(AtomicBool::new(false)) };
+        let config = term::Config { scrolling_history: scrollback, kitty_keyboard: true, ..Default::default() };
+        let mirror = Mirror::new(config, INITIAL_SIZE, listener);
+        let term = mirror.term.clone();
+        connection.add(id, mirror);
+        let handle = TermHandle { term, id, connection, size: Rc::new(Cell::new(INITIAL_SIZE)) };
+        Session { handle, job, ended: false }
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
-        if !self.exited {
+        if !self.ended {
             self.handle.write(bytes);
         }
     }
 
+    /// Stops showing the terminal, ending its program unless it is no longer this ted's.
     pub fn shutdown(&self) {
         self.job.cancel();
-        let _ = self.handle.sender.send(Msg::Shutdown);
+        let handle = &self.handle;
+        handle.connection.remove(handle.id);
+        if !self.ended {
+            handle.connection.send(&ToHost::Kill { id: handle.id });
+        }
     }
 }
 
-/// Wraps the shell so it starts with XON/XOFF flow control off: otherwise `C-s` freezes
-/// all output until `C-q`, and Emacs habits hit `C-s` constantly. With it off, `C-s`
-/// reaches the program (bash's forward history search).
+/// A new terminal id, unique across teds and hosts: the time, kept increasing, and within
+/// `i64` so it reads back as a number from a saved session.
+fn new_id() -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_nanos() as u64) & i64::MAX as u64;
+    let previous = LAST.fetch_update(Ordering::AcqRel, Ordering::Acquire, |last| Some(now.max(last + 1)));
+    previous.map_or(now, |last| now.max(last + 1))
+}
+
 /// What a new terminal runs in `dir`: `shell`, else the user's login shell.
 pub fn shell(shell: Option<(String, Vec<String>)>, dir: &Path) -> Program {
     let (program, args) =
@@ -204,23 +207,18 @@ pub fn shell(shell: Option<(String, Vec<String>)>, dir: &Path) -> Program {
     Program::new(program, dir).args(args).env("TERM", "xterm-256color").env("COLORTERM", "truecolor")
 }
 
-fn without_flow_control(shell: &Program) -> tty::Shell {
+/// The program and arguments that start `shell` with XON/XOFF flow control off: otherwise
+/// `C-s` freezes all output until `C-q`, and Emacs habits hit `C-s` constantly. With it
+/// off, `C-s` reaches the program (bash's forward history search).
+fn without_flow_control(shell: &Program) -> (String, Vec<String>) {
     let flow_control_off = "stty -ixon 2>/dev/null; exec \"$0\" \"$@\"".to_string();
-    let mut wrapped = vec!["-c".to_string(), flow_control_off, shell.program.clone()];
-    wrapped.extend(shell.args.iter().cloned());
-    tty::Shell::new("/bin/sh".to_string(), wrapped)
+    let mut args = vec!["-c".to_string(), flow_control_off, shell.program.clone()];
+    args.extend(shell.args.iter().cloned());
+    ("/bin/sh".to_string(), args)
 }
 
 pub fn write(ed: &mut Editor, id: BufferId, bytes: Vec<u8>) {
     if let Some(session) = session(ed, id) {
         session.write(bytes);
     }
-}
-
-/// A stable number per terminal, exported to the shell as `ALACRITTY_WINDOW_ID`.
-fn buffer_window_id(buffer: BufferId) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    buffer.hash(&mut h);
-    h.finish()
 }

@@ -112,3 +112,22 @@ fn terminal_runs_commands_and_switches_to_view_mode() {
     assert!(ed.buffers.find(|b| b.name() == "terminal").is_none());
     assert_eq!(ed.status, "terminal exited");
 }
+
+/// A terminal's program outlives the editor that started it, and another editor reattaching
+/// the terminal sees its screen as it was and keeps using it.
+#[test]
+fn terminal_outlives_its_editor_and_reattaches() {
+    let mut first = editor();
+    first.execute("term");
+    type_line(&mut first, "echo kept_$((6 * 7))");
+    wait_until(&mut first, "echo output", |ed| screen(ed).contains("kept_42"));
+    let terminal = first.active_buffer().restore_argument().expect("terminals save their id").to_string();
+    drop(first);
+
+    let mut second = editor();
+    second.execute_with("term", ted_core::Arg::parse(&terminal));
+    wait_until(&mut second, "the reattached screen", |ed| screen(ed).contains("kept_42"));
+    type_line(&mut second, "echo again_$((1 + 1))");
+    wait_until(&mut second, "output after reattaching", |ed| screen(ed).contains("again_2"));
+    second.execute("kill-buffer");
+}
