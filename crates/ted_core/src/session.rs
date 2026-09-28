@@ -86,6 +86,8 @@ pub struct Session {
     layout: SavedLayout,
     /// `save-window-layout` slots, by slot number.
     slots: Vec<(usize, SavedLayout)>,
+    /// What commands remember for the workspace, by name.
+    values: Vec<(String, String)>,
 }
 
 enum SavedBuffer {
@@ -145,6 +147,7 @@ impl Session {
             buffers: saved_buffers,
             layout: SavedLayout::capture(layout, &index),
             slots,
+            values: ws.values.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
         }
     }
 
@@ -182,7 +185,9 @@ impl Session {
         if let Some(stage) = staging {
             ed.kill_buffer(stage);
         }
-        ed.workspaces.active_mut().adopt(&ids);
+        let workspace = ed.workspaces.active_mut();
+        workspace.adopt(&ids);
+        workspace.values.extend(self.values);
         ed.set_status("Restored session");
     }
 
@@ -214,6 +219,9 @@ impl Session {
     fn write_text(&self, out: &mut String) {
         let _ = writeln!(out, "workspace {}", escape(self.name.as_deref().unwrap_or_default()));
         let _ = writeln!(out, "root {}", escape(&self.root.to_string_lossy()));
+        for (key, value) in &self.values {
+            let _ = writeln!(out, "value {} {}", key, escape(value));
+        }
         for buffer in &self.buffers {
             let _ = match buffer {
                 SavedBuffer::File(path) => writeln!(out, "file {}", escape(&path.to_string_lossy())),
@@ -264,14 +272,18 @@ fn parse(text: &str) -> Option<(Option<String>, Vec<Session>)> {
             "scratch-text" => scratch = Some(unescape(rest)),
             "workspace" => {
                 let name = Some(unescape(rest)).filter(|name| !name.is_empty());
-                let (buffers, layout, slots) = (Vec::new(), SavedLayout::default(), Vec::new());
-                sessions.push(Session { name, root: PathBuf::new(), buffers, layout, slots });
+                let (buffers, layout, slots, values) = (Vec::new(), SavedLayout::default(), Vec::new(), Vec::new());
+                sessions.push(Session { name, root: PathBuf::new(), buffers, layout, slots, values });
                 in_slot = false;
             }
             _ => {
                 let session = sessions.last_mut()?;
                 match kind {
                     "root" => session.root = unescape(rest).into(),
+                    "value" => {
+                        let (key, value) = rest.split_once(' ')?;
+                        session.values.push((key.to_string(), unescape(value)));
+                    }
                     "file" => session.buffers.push(SavedBuffer::File(unescape(rest).into())),
                     "scratch" => session.buffers.push(SavedBuffer::Scratch),
                     "generated" => {

@@ -13,7 +13,7 @@
 //! exits. The unnamed workspace ted starts in is never saved; naming it makes it one that
 //! is. A saved workspace is loaded the first time it is switched to.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::mem;
@@ -43,6 +43,8 @@ pub struct Workspace {
     buffers: Vec<BufferId>,
     /// Its windows while in the background; the editor holds them while it is active.
     background: Option<Windows>,
+    /// What commands remember for it (the last build), by name; saved with it.
+    pub(crate) values: BTreeMap<String, String>,
 }
 
 struct Windows {
@@ -57,6 +59,11 @@ impl Workspace {
 
     pub fn buffers(&self) -> &[BufferId] {
         &self.buffers
+    }
+
+    /// The value remembered for it under `key` (see `remember`).
+    pub fn value(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
     }
 
     /// Its windows: its own in the background, `active` (the editor's) while active.
@@ -93,7 +100,7 @@ pub struct Workspaces {
 impl Workspaces {
     /// The unnamed workspace at `root`, active, saving named ones in `dir`.
     pub(crate) fn new(dir: Option<PathBuf>, root: PathBuf) -> Self {
-        let unnamed = Workspace { name: None, root, buffers: Vec::new(), background: None };
+        let unnamed = Workspace { name: None, root, buffers: Vec::new(), background: None, values: BTreeMap::new() };
         Self { loaded: vec![unnamed], dir, save_pending: false }
     }
 
@@ -365,7 +372,8 @@ pub(crate) fn open(ed: &mut Editor, name: Option<String>, root: PathBuf) {
             let scratch = ed.ensure_scratch();
             let layout = Layout::new(scratch, ed.settings.get(settings::WRAP_LINES));
             let background = Some(Windows { layout, slots: HashMap::new() });
-            ed.workspaces.loaded.push(Workspace { name, root, buffers: Vec::new(), background });
+            let values = BTreeMap::new();
+            ed.workspaces.loaded.push(Workspace { name, root, buffers: Vec::new(), background, values });
             activate(ed, ed.workspaces.loaded.len() - 1);
         }
     }
@@ -497,7 +505,18 @@ fn discard(ed: &mut Editor, session: &Session) {
     }
 }
 
-/// Saves the active workspace soon: its buffers changed.
+/// Remembers `value` under `key` for the active workspace, saved with it: what a command
+/// offers next time there (the last build).
+pub fn remember(ed: &mut Editor, key: &str, value: impl Into<String>) {
+    let value = value.into();
+    let values = &mut ed.workspaces.active_mut().values;
+    if values.get(key) != Some(&value) {
+        values.insert(key.to_string(), value);
+        schedule_save(ed);
+    }
+}
+
+/// Saves the active workspace soon: its buffers or values changed.
 pub(crate) fn schedule_save(ed: &mut Editor) {
     if ed.workspaces.dir.is_none() || ed.workspaces.active().name.is_none() || ed.workspaces.save_pending {
         return;

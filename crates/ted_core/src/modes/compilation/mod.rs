@@ -2,7 +2,9 @@
 //! read-only `compilation` buffer. Errors and warnings are highlighted and form the
 //! buffer's location list (see `locations`): RET visits one, `n` / `p` move between them
 //! and `next-error` steps through them from any buffer. `g` reruns the command, `C-c C-k`
-//! kills it, and starting a build while one runs replaces it.
+//! kills it, and starting a build while one runs replaces it. Each workspace has its own
+//! build, so builds in different workspaces run side by side, and remembers its last
+//! build's command and directory, which `compile` offers and `recompile` runs.
 //!
 //! The job thread reads the process's merged stdout/stderr and parses it (`parse`); the
 //! UI thread only appends finished batches of text, decorations and entries.
@@ -22,6 +24,7 @@ use crate::locations::{self, LocationList, Severity};
 use crate::process::{self, Merged, Program};
 use crate::settings::Setting;
 use crate::text::collapse_tilde;
+use crate::workspace;
 
 use parse::{Batch, OutputParser};
 
@@ -29,9 +32,12 @@ pub const BUFFER_NAME: &str = "compilation";
 pub const MODE: &str = "Compilation";
 const DECORATIONS: &str = "compilation";
 
+/// Where the active workspace remembers its last build.
+const LAST_COMMAND: &str = "compile.command";
+const LAST_DIRECTORY: &str = "compile.directory";
+
 #[derive(Default)]
 struct Compilation {
-    command: String,
     dir: PathBuf,
     run: Option<Run>,
 }
@@ -69,7 +75,7 @@ pub fn register(ed: &mut Editor) {
         run(ed, command, dir);
     });
     c.register("kill-compilation", "Stop the running build", |ed, _| {
-        let Some(id) = ed.find_generated(MODE, BufferScope::Editor) else {
+        let Some(id) = ed.find_generated(MODE, BufferScope::Workspace) else {
             ed.set_status("No compilation");
             return;
         };
@@ -84,20 +90,29 @@ pub fn register(ed: &mut Editor) {
     });
 
     ed.define_mode(locations::list_mode(MODE).revert("recompile").keys(&[("C-c C-k", "kill-compilation")]));
+    // A build ends with its buffer (killed, or its workspace unloaded).
+    ed.hooks.on_buffer_killed(|ed, id| {
+        if ed.buffers[id].local::<Compilation>().is_some() {
+            stop(ed, id);
+        }
+    });
 }
 
-/// The last build's command and directory, else the configured command at the project root.
+/// The active workspace's last build command and directory, else the configured command at
+/// the project root.
 fn last_run(ed: &Editor, default_command: Setting<String>) -> (String, PathBuf) {
-    let last = ed.find_generated(MODE, BufferScope::Editor).and_then(|id| ed.buffers[id].local::<Compilation>());
-    match last.filter(|state| !state.command.is_empty()) {
-        Some(state) => (state.command.clone(), state.dir.clone()),
-        None => (ed.settings.get(default_command).to_string(), ed.project().root),
+    let workspace = ed.workspaces.active();
+    match (workspace.value(LAST_COMMAND), workspace.value(LAST_DIRECTORY)) {
+        (Some(command), Some(dir)) => (command.to_string(), PathBuf::from(dir)),
+        _ => (ed.settings.get(default_command).to_string(), ed.project().root),
     }
 }
 
 /// Starts `command` in `dir`, replacing any running build and the previous output.
 fn run(ed: &mut Editor, command: String, dir: PathBuf) {
-    let id = ed.generated_buffer(BUFFER_NAME, MODE, BufferScope::Editor);
+    workspace::remember(ed, LAST_COMMAND, &command);
+    workspace::remember(ed, LAST_DIRECTORY, dir.to_string_lossy());
+    let id = ed.generated_buffer(BUFFER_NAME, MODE, BufferScope::Workspace);
     stop(ed, id);
 
     let mut header = StyledText::new();
@@ -131,7 +146,7 @@ fn run(ed: &mut Editor, command: String, dir: PathBuf) {
             None
         }
     };
-    *ed.buffers[id].local_mut::<Compilation>() = Compilation { command, dir, run };
+    *ed.buffers[id].local_mut::<Compilation>() = Compilation { dir, run };
 }
 
 /// Stops the build running in `id`, if any: its process group is terminated and output

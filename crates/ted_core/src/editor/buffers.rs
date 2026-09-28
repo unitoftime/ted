@@ -21,11 +21,13 @@ struct PendingSave {
     then: SaveDone,
 }
 
-/// Which generated buffer of a mode is meant: the editor's one, or the one working in a
-/// directory (a repository's status, a project's build).
+/// Which generated buffer of a mode is meant: the editor's one (help), the active
+/// workspace's (a build, search results), or the one working in a directory (a
+/// repository's status).
 #[derive(Debug, Clone, Copy)]
 pub enum BufferScope<'a> {
     Editor,
+    Workspace,
     Dir(&'a Path),
 }
 
@@ -54,16 +56,17 @@ impl Editor {
         self.add_buffer(buf)
     }
 
-    /// The generated (file-less) buffer of `mode` in `scope`, if there is one.
+    /// The generated (file-less) buffer of `mode` in `scope`, if there is one: in a
+    /// workspace, the one it showed last.
     pub fn find_generated(&self, mode: &str, scope: BufferScope) -> Option<BufferId> {
-        self.buffers.find(|b| {
-            b.path().is_none()
-                && b.mode().name == mode
-                && match scope {
-                    BufferScope::Editor => true,
-                    BufferScope::Dir(dir) => b.directory() == dir,
-                }
-        })
+        let generated = |b: &Buffer| b.path().is_none() && b.mode().name == mode;
+        match scope {
+            BufferScope::Editor => self.buffers.find(generated),
+            BufferScope::Workspace => {
+                self.workspaces.active().buffers().iter().copied().find(|&id| generated(&self.buffers[id]))
+            }
+            BufferScope::Dir(dir) => self.buffers.find(|b| generated(b) && b.directory() == dir),
+        }
     }
 
     /// The generated buffer of `mode` in `scope`, created empty if needed (working in the
@@ -73,7 +76,14 @@ impl Editor {
     pub fn generated_buffer(&mut self, name: &str, mode: &str, scope: BufferScope) -> BufferId {
         let id = match self.find_generated(mode, scope) {
             Some(id) => id,
-            None => self.new_buffer(name, mode),
+            None => {
+                let id = self.new_buffer(name, mode);
+                // Found there from now on, even before a window shows it.
+                if let BufferScope::Workspace = scope {
+                    self.workspaces.touch(id);
+                }
+                id
+            }
         };
         let buf = &mut self.buffers[id];
         buf.set_name(name);

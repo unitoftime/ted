@@ -185,7 +185,7 @@ pub fn fill_list(ed: &mut Editor, name: &str, mode: &str, header: &str, items: &
         let spec = row_spec((&loc.path, loc.line, loc.col, &item.text), item.severity).point_at(prefix);
         text.row(spec, &parts);
     }
-    let id = ed.generated_buffer(name, mode, BufferScope::Editor);
+    let id = ed.generated_buffer(name, mode, BufferScope::Workspace);
     text.install_fresh(ed, id, "locations");
     let targets =
         order.iter().map(|item| Target { severity: item.severity, location: item.location.clone() }).collect();
@@ -227,8 +227,16 @@ pub(crate) fn register(ed: &mut Editor) {
 }
 
 /// `next-error` / `previous-error`: steps from the current entry and visits the result.
+/// The list `next-error` steps through: the current one if the active workspace has it, else
+/// the workspace's most recently shown list.
+fn current_list(ed: &Editor) -> Option<BufferId> {
+    let shown = ed.workspaces.active().buffers();
+    let current = ed.ext::<CurrentList>().and_then(|c| c.0).filter(|id| shown.contains(id));
+    current.or_else(|| shown.iter().copied().find(|&id| ed.buffers[id].local::<LocationList>().is_some()))
+}
+
 fn step_current(ed: &mut Editor, forward: bool) {
-    let Some(id) = ed.ext::<CurrentList>().and_then(|c| c.0).filter(|&id| ed.buffers.contains(id)) else {
+    let Some(id) = current_list(ed) else {
         ed.set_status("No location list (run compile first)");
         return;
     };
