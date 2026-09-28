@@ -156,6 +156,8 @@ const PICKER: &[(&str, &str)] = &[
     ("C-c", "modal-quit"),
 ];
 
+const FILE_SEARCH: &[(&str, &str)] = &[("C-s", "file-search-toggle-scope")];
+
 /// The completion popup. Other keys close it and then act as usual (word characters type
 /// on, narrowing the candidates).
 const COMPLETION: &[(&str, &str)] = &[
@@ -225,6 +227,7 @@ pub(crate) fn install_defaults(ed: &mut Editor) {
     ed.bind_all("minibuffer", MINIBUFFER);
     ed.bind_all("search", SEARCH);
     ed.bind_all("picker", PICKER);
+    ed.bind_all("file-search", FILE_SEARCH);
     ed.bind_all("choice", CHOICE);
     ed.bind_all("menu", MENU);
     ed.bind_all("undo-tree", UNDO_TREE);

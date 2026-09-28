@@ -41,6 +41,7 @@ const BUILTIN: &[(&str, Option<KeymapId>, bool)] = &[
     ("special", None, false),
     ("completion", None, true),
     ("tooltip", None, true),
+    ("file-search", Some(KeymapId::PICKER), false),
 ];
 
 impl KeymapId {
@@ -61,6 +62,8 @@ impl KeymapId {
     /// buffer.
     pub const COMPLETION: KeymapId = KeymapId(10);
     pub const TOOLTIP: KeymapId = KeymapId(11);
+    /// The file search picker, on top of `PICKER`.
+    pub const FILE_SEARCH: KeymapId = KeymapId(12);
 }
 
 #[derive(Clone)]

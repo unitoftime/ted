@@ -1,3 +1,4 @@
+
 # Issues
 
 ## Features
@@ -12,7 +13,9 @@
   that it doesn't feel remote.
 - [x] **More language server features.** Completion, hover, rename and formatting.
 - [x] Package a few high-quality fonts inside the editor?
-- [ ] I need a way to ripgrep search relative to wherever I am. Lik C-c C-s searches the project, but a lot of times I want to like search downstream of where I currently am
+- [x] I need a way to ripgrep search relative to wherever I am. Lik C-c C-s searches the project, but a lot of times I want to like search downstream of where I currently am
+- [ ] When commiting, it'd be nice to show syntax highlighting on the commit message
+- [ ] My position is constantly lost in files it feels like, for example I'll have a dired buffer and I just want to go through all the documents to look for one thing, every time i close the doc the dired buffer has my cursor in the wrong place. the same thing happens when a buffer goes away and I open it again. my cursor goes back to the start
 
 ## Bugs
 

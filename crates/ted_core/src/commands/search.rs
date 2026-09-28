@@ -1,4 +1,6 @@
-//! Incremental search, replace and live project search.
+//! Incremental search, replace and live file search.
+
+use std::path::PathBuf;
 
 use crate::editor::Editor;
 use crate::grep;
@@ -18,7 +20,7 @@ const REPLACE_PAIRS: &str = "replace-string-pairs";
 /// Separates target and replacement in a `REPLACE_PAIRS` entry (ASCII unit separator).
 const PAIR_SEPARATOR: char = '\u{1f}';
 
-/// Most hits a project search lists; a broad query stops there.
+/// Most hits a file search lists; a broad query stops there.
 const SEARCH_LIMIT: usize = 2000;
 /// Shorter queries match nearly every line, so they don't search.
 const MIN_QUERY_CHARS: usize = 2;
@@ -166,9 +168,28 @@ pub fn register(ed: &mut Editor) {
 
     c.register("replace-string", "Replace every occurrence of a string in the buffer", |ed, _| replace_string(ed));
 
-    c.register("project-search", "Search the project's files as you type (starting with the region)", |ed, _| {
-        project_search(ed)
-    });
+    c.register(
+        "file-search",
+        "Search the files under the buffer's directory as you type (starting with the region)",
+        |ed, _| {
+            let buf = ed.active_buffer();
+            let region = ed.active_view().cursor.region().map(|r| buf.slice_to_string(r));
+            file_search(ed, Scope::Directory, region.filter(|text| !text.contains('\n')));
+        },
+    );
+    c.register_hidden(
+        "file-search-toggle-scope",
+        "Switch the file search between the buffer's directory and its project",
+        |ed, _| {
+            let other = match ed.top_modal().map(|modal| modal.id()) {
+                Some(id) if id == Scope::Directory.picker_id() => Scope::Project,
+                Some(id) if id == Scope::Project.picker_id() => Scope::Directory,
+                _ => return,
+            };
+            let Some(picker) = ed.take_modal::<Picker>() else { return };
+            file_search(ed, other, Some(picker.input.text().to_string()));
+        },
+    );
 }
 
 /// Ends the search at the current match, recording its query.
@@ -243,12 +264,34 @@ fn set_highlight(ed: &mut Editor, pattern: Option<&str>) {
     ed.active_view_mut().highlight = pattern.filter(|p| !p.is_empty()).map(str::to_string);
 }
 
-/// A live picker of the lines matching the query in the files of the active buffer's
-/// project, as they are found. Choosing one jumps there (`M-,` comes back).
-fn project_search(ed: &mut Editor) {
-    let root = ed.project().root;
-    let buf = ed.active_buffer();
-    let region = ed.active_view().cursor.region().map(|r| buf.slice_to_string(r)).filter(|text| !text.contains('\n'));
+/// Where a file search looks: under the active buffer's directory, or its whole project.
+#[derive(Clone, Copy)]
+enum Scope {
+    Directory,
+    Project,
+}
+
+impl Scope {
+    /// Each scope's picker has its own id, which is how toggling tells them apart.
+    fn picker_id(self) -> &'static str {
+        match self {
+            Scope::Directory => "directory-search",
+            Scope::Project => "project-search",
+        }
+    }
+
+    fn root(self, ed: &Editor) -> PathBuf {
+        match self {
+            Scope::Directory => ed.active_buffer().directory(),
+            Scope::Project => ed.project().root,
+        }
+    }
+}
+
+/// A live picker of the lines matching the query in the files under `scope`, as they are
+/// found, starting with `query`. Choosing one jumps there (`M-,` comes back).
+fn file_search(ed: &mut Editor, scope: Scope, query: Option<String>) {
+    let root = scope.root(ed);
     let title = format!("Search {}", collapse_tilde(&root));
     let search = move |query: &str, feed: &Feed<Location>| {
         if query.chars().count() < MIN_QUERY_CHARS {
@@ -262,12 +305,13 @@ fn project_search(ed: &mut Editor) {
             feed.send(entries);
         });
     };
-    let mut picker = Picker::live("project-search", title, search, |ed, location| {
+    let mut picker = Picker::live(scope.picker_id(), title, search, |ed, location| {
         xref::push_mark(ed);
         locations::visit(ed, &location);
-    });
-    if let Some(region) = region {
-        picker.set_query(ed, &region);
+    })
+    .keymap(KeymapId::FILE_SEARCH);
+    if let Some(query) = query {
+        picker.set_query(ed, &query);
     }
     ed.push_modal(picker);
 }
