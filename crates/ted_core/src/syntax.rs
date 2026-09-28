@@ -445,11 +445,11 @@ impl Syntax {
         });
     }
 
-    pub fn highlight(&mut self, rope: &Rope, lines: Range<usize>) -> Vec<Vec<SyntaxToken>> {
+    pub fn highlight(&mut self, rope: &Rope, ranges: &[Range<usize>]) -> Vec<Vec<SyntaxToken>> {
         self.tree = parse_rope(&mut self.parser, rope, self.tree.as_ref());
         match &self.tree {
-            Some(tree) => highlight_lines(tree, &self.grammar, rope, lines),
-            None => Vec::new(),
+            Some(tree) => highlight_ranges(tree, &self.grammar, rope, ranges),
+            None => vec![Vec::new(); ranges.len()],
         }
     }
 
@@ -484,37 +484,34 @@ pub fn parse_rope(parser: &mut Parser, rope: &Rope, old_tree: Option<&Tree>) -> 
     )
 }
 
-/// Highlight tokens for `lines`, indexed by `line - lines.start`.
-pub fn highlight_lines(tree: &Tree, grammar: &Grammar, rope: &Rope, lines: Range<usize>) -> Vec<Vec<SyntaxToken>> {
-    let end_line = lines.end.min(rope.len_lines());
-    let mut result: Vec<Vec<SyntaxToken>> = vec![Vec::new(); end_line.saturating_sub(lines.start)];
-    if result.is_empty() {
-        return result;
-    }
-
+/// Highlight tokens within each char range of `ranges` (each inside one line), with
+/// columns counted from the start of its line.
+pub fn highlight_ranges(tree: &Tree, grammar: &Grammar, rope: &Rope, ranges: &[Range<usize>]) -> Vec<Vec<SyntaxToken>> {
     let mut cursor = QueryCursor::new();
-    cursor.set_point_range(Point { row: lines.start, column: 0 }..Point { row: end_line, column: 0 });
-    let mut captures = cursor.captures(&grammar.query, tree.root_node(), RopeText(rope));
-
-    while let Some((mat, capture_idx)) = captures.next() {
-        let cap = mat.captures[*capture_idx];
-        let kind = grammar.kinds[cap.index as usize];
-        if kind == SyntaxKind::Plain {
-            continue;
-        }
-        let (start, end) = (cap.node.start_position(), cap.node.end_position());
-        for row in start.row.max(lines.start)..=end.row.min(end_line - 1) {
-            let line = rope.line(row);
-            let line_bytes = line.len_bytes();
-            let byte_start = if row == start.row { start.column.min(line_bytes) } else { 0 };
-            let byte_end = if row == end.row { end.column.min(line_bytes) } else { line_bytes };
-            let (start_col, end_col) = (line.byte_to_char(byte_start), line.byte_to_char(byte_end));
-            if start_col < end_col {
-                result[row - lines.start].push(SyntaxToken { start_col, end_col, kind });
+    ranges
+        .iter()
+        .map(|range| {
+            let mut tokens = Vec::new();
+            if range.is_empty() {
+                return tokens;
             }
-        }
-    }
-    result
+            let line_start = rope.line_to_char(rope.char_to_line(range.start));
+            let bytes = rope.char_to_byte(range.start)..rope.char_to_byte(range.end);
+            cursor.set_byte_range(bytes.clone());
+            let mut captures = cursor.captures(&grammar.query, tree.root_node(), RopeText(rope));
+            while let Some((mat, capture_idx)) = captures.next() {
+                let cap = mat.captures[*capture_idx];
+                let kind = grammar.kinds[cap.index as usize];
+                let (start, end) = (cap.node.start_byte().max(bytes.start), cap.node.end_byte().min(bytes.end));
+                if kind != SyntaxKind::Plain && start < end {
+                    let (start_col, end_col) =
+                        (rope.byte_to_char(start) - line_start, rope.byte_to_char(end) - line_start);
+                    tokens.push(SyntaxToken { start_col, end_col, kind });
+                }
+            }
+            tokens
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -125,18 +125,15 @@ fn find_targets(ed: &mut Editor, scope: Scope, ch: char) -> Vec<Target> {
         if doc.buf.has_renderer() {
             continue;
         }
-        let (point, wrap, left) = (doc.pos(), doc.view.wrap, doc.view.left_col);
-        let screen_cols = left..left + doc.content_cols();
-        for line in doc.visible_lines() {
-            let start = doc.buf.line_to_char(line);
-            let layout = (!wrap).then(|| doc.display_line(line));
-            let mut prev_is_word = false;
-            for (i, c) in doc.buf.line_content(line).chars().enumerate() {
+        let point = doc.pos();
+        for sl in doc.screen_lines() {
+            let (chars, content) = (sl.layout.chars(), doc.buf.line_content(sl.line));
+            let mut prev_is_word = chars.start > 0 && content.char(chars.start - 1).is_alphanumeric();
+            for (i, c) in chars.clone().zip(content.chars_at(chars.start)) {
                 let head = scope == Scope::Anywhere || !prev_is_word;
                 prev_is_word = c.is_alphanumeric();
-                let on_screen = layout.as_ref().is_none_or(|dl| screen_cols.contains(&dl.col(i)));
-                if head && on_screen && matches(c) {
-                    let pos = start + i;
+                if head && sl.cols.contains(&sl.layout.col(i)) && matches(c) {
+                    let pos = sl.line_start + i;
                     found.push((id != active, pos.abs_diff(point), Target { view: id, pos, label: String::new() }));
                 }
             }

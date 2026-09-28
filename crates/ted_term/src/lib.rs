@@ -207,6 +207,7 @@ fn view_mode(ed: &mut Editor, id: BufferId) {
     for view in ed.layout.views_showing(id) {
         view.goto(pos);
         view.top_line = snap.screen_top;
+        view.top_row = 0;
     }
 }
 

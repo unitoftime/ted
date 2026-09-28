@@ -1,7 +1,7 @@
 //! Renders a view into a `Frame`.
 //!
-//! One path handles wrapped and unwrapped views: each logical line is laid out once as a
-//! `DisplayLine`, then drawn as one or more row segments. Everything styled on a line —
+//! One path handles wrapped and unwrapped views: each line on screen is laid out once, over
+//! just the columns it shows, as a `DisplayLine`, then drawn as one or more row segments. Everything styled on a line —
 //! syntax, buffer decorations, the selection, search matches — becomes a face span over
 //! visual columns: spans with a background paint rects, the rest restyle the text.
 
@@ -54,7 +54,6 @@ impl Doc<'_> {
         }
 
         let faces = cx.faces;
-        let text_rows = self.view.text_rows();
         let gutter_cols = self.gutter_cols();
         let margin_cols = self.margin_cols();
         let gutter_w = gutter_cols as f32 * m.char_w;
@@ -77,35 +76,36 @@ impl Doc<'_> {
             frame.fill_rect(gutter_clip, faces.bg(FaceId::LINE_NUMBER));
         }
 
-        let total_lines = self.buf.len_lines();
-        let top = self.view.top_line;
-        let visible_lines = top..(top + text_rows).min(total_lines);
-        let tokens = self.buf.highlight(visible_lines.clone());
+        let mut screen = self.screen_lines();
+        let ranges: Vec<Range<usize>> = screen.iter().map(|sl| sl.char_range()).collect();
+        let tokens = self.buf.highlight(&ranges);
         let (cur_line, cur_col) = self.buf.char_to_point(self.pos());
         let region = self.region();
         let line_face = mode.line_face.clone();
-        let visible_chars = self.buf.line_to_char(visible_lines.start)..self.buf.line_to_char(visible_lines.end);
+        // One past the last range covers decorations on its newline.
+        let visible_chars = ranges.first().map_or(0, |r| r.start)..ranges.last().map_or(0, |r| r.end + 1);
         let decorations: Vec<_> = self.buf.decorations().overlapping(visible_chars).cloned().collect();
         // Highlighting just parsed, so the tree is current.
         let brackets =
             if focused { brackets::matching_pair(self.buf.text(), self.buf.syntax_tree(), self.pos()) } else { None };
         let margin = self.buf.margin();
+        let first_col = if wrap { 0 } else { self.view.left_col };
+        let (_, cursor_row, cursor_col) = self.visual_pos(self.pos());
+        let cursor_col = cursor_col.saturating_sub(first_col);
 
         let mut cursor_at: Option<(f32, f32)> = None;
         let mut screen_row = 0;
-        for line in visible_lines.clone() {
-            if screen_row >= text_rows {
-                break;
-            }
+        for (sl, line_tokens) in screen.iter_mut().zip(tokens) {
+            let line = sl.line;
             let content = self.buf.line_content(line);
-            let mut dl = self.display_line(line);
-            let line_start = self.buf.line_to_char(line);
-            let line_end = line_start + dl.char_len();
+            let (line_start, chars) = (sl.line_start, sl.char_range());
+            let line_end = line_start + content.len_chars();
             let jump_spans = self.view.jump.as_deref().map(|labels| {
-                let on_line = &labels
-                    [labels.partition_point(|l| l.pos < line_start)..labels.partition_point(|l| l.pos < line_end)];
-                write_labels(&mut dl, on_line, line_start)
+                let on_screen = &labels
+                    [labels.partition_point(|l| l.pos < chars.start)..labels.partition_point(|l| l.pos < chars.end)];
+                write_labels(&mut sl.layout, on_screen, line_start)
             });
+            let dl = &sl.layout;
             let is_current = line == cur_line;
             let whole_line_face = line_face.as_ref().and_then(|f| match content.as_str() {
                 Some(text) => f(text),
@@ -116,7 +116,8 @@ impl Doc<'_> {
             let cols_of = |range: &Range<usize>| -> Option<Range<usize>> {
                 let (start, end) = (range.start.max(line_start), range.end.min(line_end + 1));
                 (start < end).then(|| {
-                    let end_col = if end > line_end { dl.width() + 1 } else { dl.col(end - line_start) };
+                    let end_col =
+                        if end > line_end { dl.col(line_end - line_start) + 1 } else { dl.col(end - line_start) };
                     dl.col(start - line_start)..end_col
                 })
             };
@@ -125,7 +126,7 @@ impl Doc<'_> {
             let spans = jump_spans.unwrap_or_else(|| {
                 let mut spans: Vec<Span> = Vec::new();
                 if whole_line_face.is_none() {
-                    for t in tokens.get(line - top).into_iter().flatten() {
+                    for t in &line_tokens {
                         spans.push(Span { cols: dl.col(t.start_col)..dl.col(t.end_col), face: t.kind.face() });
                     }
                 }
@@ -143,8 +144,12 @@ impl Doc<'_> {
                     }
                 }
                 if let Some(pattern) = self.view.highlight.as_deref().filter(|p| !p.is_empty()) {
+                    // Matches overlapping the chars laid out.
                     let len = pattern.chars().count();
-                    for m in find_in_slice(content, pattern) {
+                    let shown = dl.chars();
+                    let from = shown.start.saturating_sub(len - 1);
+                    let to = (shown.end + len - 1).min(content.len_chars());
+                    for m in find_in_slice(content.slice(from..to), pattern).into_iter().map(|m| from + m) {
                         let current = is_current && (m..=m + len).contains(&cur_col);
                         let face = if current { FaceId::SEARCH } else { FaceId::LAZY_HIGHLIGHT };
                         spans.push(Span { cols: dl.col(m)..dl.col(m + len), face });
@@ -153,21 +158,16 @@ impl Doc<'_> {
                 spans
             });
 
-            let (segments, first_col) = if wrap { (dl.rows(content_cols), 0) } else { (1, self.view.left_col) };
-            let (cursor_row, cursor_col) =
-                if wrap { dl.row_col(cur_col, content_cols) } else { (0, dl.col(cur_col).saturating_sub(first_col)) };
             let base = match whole_line_face {
                 _ if self.view.jump.is_some() => mode_face.merge(faces.get(FaceId::SHADOW)),
                 Some(face) => mode_face.merge(faces.get(face)),
                 None => mode_face,
             };
 
-            for segment in 0..segments {
-                if screen_row >= text_rows {
-                    break;
-                }
+            for segment in 0..sl.rows {
+                let row = sl.first_row + segment;
                 let y = bounds.y + screen_row as f32 * m.line_h;
-                let cols = first_col + segment * content_cols..first_col + (segment + 1) * content_cols;
+                let cols = sl.cols.start + segment * content_cols..sl.cols.start + (segment + 1) * content_cols;
 
                 if is_current && focused && mode.highlight_line {
                     frame.fill_rect(Rect::new(text_x, y, text_w, m.line_h), faces.bg(FaceId::CURRENT_LINE));
@@ -180,7 +180,7 @@ impl Doc<'_> {
                         frame.fill_rect(Rect::new(x, y, (end - start) as f32 * m.char_w, m.line_h), bg);
                     }
                 }
-                if let Some(annotation) = margin.and_then(|mg| mg.lines.get(line)).filter(|_| segment == 0) {
+                if let Some(annotation) = margin.and_then(|mg| mg.lines.get(line)).filter(|_| row == 0) {
                     let mut x = bounds.x;
                     for (text, face) in annotation.runs() {
                         let face =
@@ -189,7 +189,7 @@ impl Doc<'_> {
                         x += text.chars().count() as f32 * m.char_w;
                     }
                 }
-                if line_numbers && segment == 0 {
+                if line_numbers && row == 0 {
                     let face = if is_current && focused {
                         faces.get(FaceId::LINE_NUMBER).merge(faces.get(FaceId::LINE_NUMBER_CURRENT))
                     } else {
@@ -199,10 +199,11 @@ impl Doc<'_> {
                     frame.draw_text_clipped(bounds.x + margin_w, y, number, faces.style(face), gutter_clip);
                 }
 
-                let visible = cols.start.min(dl.width())..cols.end.min(dl.width());
-                draw_runs(frame, &dl, &spans, base, visible, (text_x, y), m.char_w, content_clip, faces);
+                let laid_out = dl.cols();
+                let visible = cols.start.max(laid_out.start)..cols.end.min(laid_out.end);
+                draw_runs(frame, dl, &spans, base, visible, (text_x, y), m.char_w, content_clip, faces);
 
-                if is_current && segment == cursor_row {
+                if is_current && row == cursor_row {
                     cursor_at = Some((text_x + cursor_col as f32 * m.char_w, y));
                 }
                 screen_row += 1;
@@ -260,18 +261,7 @@ impl Doc<'_> {
 fn write_labels(dl: &mut DisplayLine, labels: &[JumpLabel], line_start: usize) -> Vec<Span> {
     labels
         .iter()
-        .map(|label| {
-            let start = dl.col(label.pos - line_start);
-            let mut end = start;
-            for ch in label.text.chars() {
-                match dl.cells.get_mut(end) {
-                    Some(cell) => *cell = ch,
-                    None => dl.cells.push(ch),
-                }
-                end += 1;
-            }
-            Span { cols: start..end, face: FaceId::JUMP_LABEL }
-        })
+        .map(|label| Span { cols: dl.overwrite(dl.col(label.pos - line_start), &label.text), face: FaceId::JUMP_LABEL })
         .collect()
 }
 
@@ -308,7 +298,7 @@ fn draw_runs(
     while run_start < cell_faces.len() {
         let face = cell_faces[run_start];
         let run_len = cell_faces[run_start..].iter().take_while(|f| **f == face).count();
-        let text: String = dl.cells[cols.start + run_start..cols.start + run_start + run_len].iter().collect();
+        let text: String = dl.cells(cols.start + run_start..cols.start + run_start + run_len).iter().collect();
         frame.draw_text_clipped(x + run_start as f32 * char_w, y, text, faces.style(face), clip);
         run_start += run_len;
     }

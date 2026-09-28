@@ -10,10 +10,11 @@
 - [ ] **Remote editing over SSH.** Open `/ssh:host:path` paths directly instead of running
   an editor inside the terminal.
 - [x] **More language server features.** Completion, hover, rename and formatting.
+- [ ] Package a few high-quality fonts inside the editor?
 
 ## Bugs
 
-- [ ] Bold and italic text in the terminal sometimes has uneven spacing, possibly from
+- [x] Bold and italic text in the terminal sometimes has uneven spacing, possibly from
   measuring with the wrong font. It may already be fixed; this needs confirming.
 
 ## Architecture
@@ -24,7 +25,7 @@
 
 ## Performance
 
-- [ ] Very long lines are laid out in full on every frame.
+- [x] Very long lines are laid out in full on every frame.
 - [ ] External file changes are detected by polling modification times every 500ms. A file
   watcher would be event-driven.
 - [ ] Decorations shift in O(n) per edit and are queried linearly. An interval tree would

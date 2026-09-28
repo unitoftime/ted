@@ -582,11 +582,12 @@ impl Buffer {
     // Syntax
     // ---------------------------------------------------------------------------------
 
-    /// Highlight tokens for `lines`, indexed by `line - lines.start`.
-    pub fn highlight(&mut self, lines: Range<usize>) -> Vec<Vec<SyntaxToken>> {
+    /// Highlight tokens within each char range of `ranges` (each inside one line), one list
+    /// per range, with columns counted from the start of its line.
+    pub fn highlight(&mut self, ranges: &[Range<usize>]) -> Vec<Vec<SyntaxToken>> {
         match &mut self.syntax {
-            Some(syntax) => syntax.highlight(&self.text, lines),
-            None => Vec::new(),
+            Some(syntax) => syntax.highlight(&self.text, ranges),
+            None => vec![Vec::new(); ranges.len()],
         }
     }
 

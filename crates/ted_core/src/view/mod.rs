@@ -6,7 +6,7 @@ pub mod visual;
 use std::ops::Range;
 
 pub use render::{BufferRenderer, RenderCtx};
-pub use visual::{DisplayLine, NO_WRAP, WIDE_CONTINUATION};
+pub use visual::{rows_for_width, DisplayLine, ScreenLine, VisualLine, NO_WRAP, WIDE_CONTINUATION};
 
 use crate::buffer::{BufferId, Buffers};
 use crate::frame::{Metrics, Rect};
@@ -53,6 +53,9 @@ pub struct View {
     pub buffer: BufferId,
     pub cursor: Cursor,
     pub top_line: usize,
+    /// Visual row of `top_line` shown first: a wrapped line taller than the window scrolls
+    /// within itself. Always 0 without wrapping.
+    pub top_row: usize,
     pub left_col: usize,
     pub wrap: bool,
     pub line_numbers: bool,
@@ -82,6 +85,7 @@ impl View {
             buffer,
             cursor: Cursor::default(),
             top_line: 0,
+            top_row: 0,
             left_col: 0,
             wrap,
             line_numbers: true,
@@ -152,6 +156,7 @@ impl View {
         self.buffer = buffer;
         self.cursor = Cursor::default();
         self.top_line = 0;
+        self.top_row = 0;
         self.left_col = 0;
         self.highlight = None;
         self.jump = None;
@@ -169,13 +174,17 @@ impl View {
     pub fn clamp(&mut self, len_chars: usize, len_lines: usize) {
         self.cursor.pos = self.cursor.pos.min(len_chars);
         self.cursor.mark = self.cursor.mark.filter(|&m| m <= len_chars);
-        self.top_line = self.top_line.min(len_lines.saturating_sub(1));
+        if self.top_line >= len_lines {
+            self.top_line = len_lines.saturating_sub(1);
+            self.top_row = 0;
+        }
     }
 
     /// Back to the start of the buffer: cursor, mark and scroll reset.
     pub fn reset(&mut self) {
         self.cursor = Cursor::default();
         self.top_line = 0;
+        self.top_row = 0;
         self.left_col = 0;
     }
 

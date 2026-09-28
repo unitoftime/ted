@@ -7,7 +7,7 @@ use std::ops::Range;
 use crate::buffer::{Buffer, EditKind};
 use crate::mode::IndentStyle;
 use crate::text::{word_len_backward, word_len_forward};
-use crate::view::{DisplayLine, View, NO_WRAP};
+use crate::view::{rows_for_width, ScreenLine, View, VisualLine, NO_WRAP};
 
 pub struct Doc<'a> {
     pub view: &'a mut View,
@@ -63,53 +63,90 @@ impl<'a> Doc<'a> {
         }
     }
 
-    pub fn display_line(&self, line: usize) -> DisplayLine {
-        DisplayLine::new(self.buf.line_content(line), self.buf.tab_width())
+    /// `line`'s geometry as this view draws it.
+    pub fn visual_line(&self, line: usize) -> VisualLine<'_> {
+        VisualLine::new(self.buf.line_content(line), self.buf.tab_width(), self.wrap())
     }
 
-    fn line_rows(&self, line: usize) -> usize {
-        self.display_line(line).rows(self.wrap())
+    /// Screen rows `line` takes, counting no further than `max`.
+    fn line_rows(&self, line: usize, max: usize) -> usize {
+        self.visual_line(line).rows(max)
     }
 
-    /// Lines at least partly on screen, as of the last render's geometry.
-    pub fn visible_lines(&self) -> Range<usize> {
-        let (top, rows, total) = (self.view.top_line, self.view.text_rows(), self.buf.len_lines());
-        if !self.view.wrap {
-            return top.min(total)..(top + rows).min(total);
-        }
-        let (mut line, mut used) = (top, 0);
-        while line < total && used < rows {
-            used += self.line_rows(line);
+    /// The lines on screen from the top of the view, each laid out over just the columns
+    /// it shows.
+    pub fn screen_lines(&self) -> Vec<ScreenLine> {
+        let (text_rows, content_cols, wrap) = (self.view.text_rows(), self.content_cols(), self.view.wrap);
+        let total = self.buf.len_lines();
+        let (mut line, mut first_row) = (self.view.top_line, if wrap { self.view.top_row } else { 0 });
+        let mut used = 0;
+        let mut lines = Vec::new();
+        while used < text_rows && line < total {
+            let left = text_rows - used;
+            let cols = if wrap {
+                first_row * content_cols..(first_row + left) * content_cols
+            } else {
+                self.view.left_col..self.view.left_col + content_cols
+            };
+            let layout = self.visual_line(line).layout(cols.clone());
+            let rows = match (wrap, layout.ends_line()) {
+                (false, _) => 1,
+                (true, true) => rows_for_width(layout.end_col(), content_cols).saturating_sub(first_row).min(left),
+                (true, false) => left,
+            };
+            lines.push(ScreenLine { line, line_start: self.buf.line_to_char(line), first_row, rows, cols, layout });
+            used += rows;
             line += 1;
+            first_row = 0;
         }
-        top.min(total)..line
+        lines
     }
 
     /// (line, visual row within the line, column within that row) of `pos`.
     pub fn visual_pos(&self, pos: usize) -> (usize, usize, usize) {
         let (line, col) = self.buf.char_to_point(pos);
-        let (row, row_col) = self.display_line(line).row_col(col, self.wrap());
+        let (row, row_col) = self.visual_line(line).row_col(col);
         (line, row, row_col)
     }
 
     fn pos_at_visual(&self, line: usize, row: usize, col: usize) -> usize {
-        let ch = self.display_line(line).char_at_row_col(row, col, self.wrap());
-        self.buf.line_to_char(line) + ch
+        self.buf.line_to_char(line) + self.visual_line(line).char_at_row_col(row, col)
     }
 
-    /// The first line to show so that visual `row` of `line` lands on screen row `target`.
-    fn top_for(&self, line: usize, row: usize, target: usize) -> usize {
-        let mut needed = target.saturating_sub(row);
-        let mut top = line;
-        while top > 0 && needed > 0 {
-            let rows = self.line_rows(top - 1);
-            if rows > needed {
-                break;
+    /// The visual row `delta` rows from visual `row` of `line`, stopping at the buffer's
+    /// first and last rows.
+    fn step_rows(&self, (mut line, row): (usize, usize), delta: isize) -> (usize, usize) {
+        let mut row = row.min(self.line_rows(line, row + 1) - 1);
+        let mut left = delta.unsigned_abs();
+        if delta < 0 {
+            while left > row {
+                if line == 0 {
+                    return (0, 0);
+                }
+                left -= row + 1;
+                line -= 1;
+                row = self.line_rows(line, usize::MAX) - 1;
             }
-            needed -= rows;
-            top -= 1;
+            return (line, row - left);
         }
-        top
+        let last_line = self.buf.len_lines().saturating_sub(1);
+        loop {
+            let rows = self.line_rows(line, row.saturating_add(left).saturating_add(1));
+            if row + left < rows || line == last_line {
+                return (line, (row + left).min(rows - 1));
+            }
+            left -= rows - row;
+            line += 1;
+            row = 0;
+        }
+    }
+
+    fn top(&self) -> (usize, usize) {
+        (self.view.top_line, self.view.top_row)
+    }
+
+    fn set_top(&mut self, (line, row): (usize, usize)) {
+        (self.view.top_line, self.view.top_row) = (line, row);
     }
 
     /// Scrolls just enough to keep the cursor on screen.
@@ -117,17 +154,11 @@ impl<'a> Doc<'a> {
         self.view.scrolled_from = None;
         let text_rows = self.view.text_rows();
         let (line, row, col) = self.visual_pos(self.pos());
-        let top = self.view.top_line;
-        if line < top {
-            self.view.top_line = line;
-        } else if line - top >= text_rows {
-            self.view.top_line = self.top_for(line, row, text_rows - 1);
-        } else if self.view.wrap {
-            let mut rows_above: usize = (top..line).map(|l| self.line_rows(l)).sum::<usize>() + row;
-            while rows_above >= text_rows && self.view.top_line < line {
-                rows_above -= self.line_rows(self.view.top_line);
-                self.view.top_line += 1;
-            }
+        let top = self.top();
+        if (line, row) < top {
+            self.set_top((line, row));
+        } else if (line, row) > self.step_rows(top, text_rows as isize - 1) {
+            self.set_top(self.step_rows((line, row), -(text_rows as isize - 1)));
         }
 
         if self.view.wrap {
@@ -145,9 +176,9 @@ impl<'a> Doc<'a> {
     /// Brings the cursor into view after a jump: left alone if it is on screen, centered
     /// otherwise.
     pub fn reveal(&mut self) {
-        let before = (self.view.top_line, self.view.left_col);
+        let before = (self.top(), self.view.left_col);
         self.ensure_cursor_visible();
-        if (self.view.top_line, self.view.left_col) != before {
+        if (self.top(), self.view.left_col) != before {
             self.recenter(RecenterTarget::Center);
         }
     }
@@ -161,15 +192,14 @@ impl<'a> Doc<'a> {
             RecenterTarget::Top => 0,
             RecenterTarget::Bottom => text_rows - 1,
         };
-        let max_top = self.buf.len_lines().saturating_sub(1);
-        self.view.top_line = self.top_for(line, row, target_row).min(max_top);
+        self.set_top(self.step_rows((line, row), -(target_row as isize)));
     }
 
-    /// Scrolls the view, leaving the cursor where it is (even off screen) until it moves.
-    pub fn scroll(&mut self, delta_lines: isize) {
+    /// Scrolls the view by `delta_rows` screen rows, leaving the cursor where it is (even
+    /// off screen) until it moves.
+    pub fn scroll(&mut self, delta_rows: isize) {
         self.view.scrolled_from = Some(self.pos());
-        let max_top = self.buf.len_lines().saturating_sub(1);
-        self.view.top_line = self.view.top_line.saturating_add_signed(delta_lines).min(max_top);
+        self.set_top(self.step_rows(self.top(), delta_rows));
     }
 
     /// Buffer position under screen point (`x`, `y`), using the last rendered geometry.
@@ -181,18 +211,7 @@ impl<'a> Doc<'a> {
         let screen_row = (((y - bounds.y) / m.line_h).floor() as usize).min(self.view.text_rows() - 1);
         let gutter_w = self.gutter_cols() as f32 * m.char_w;
         let col = ((x - bounds.x - gutter_w).max(0.0) / m.char_w).round() as usize;
-
-        let last_line = self.buf.len_lines().saturating_sub(1);
-        let (mut line, mut row) = (self.view.top_line.min(last_line), screen_row);
-        loop {
-            let rows = self.line_rows(line);
-            if row < rows || line == last_line {
-                row = row.min(rows - 1);
-                break;
-            }
-            row -= rows;
-            line += 1;
-        }
+        let (line, row) = self.step_rows(self.top(), screen_row as isize);
         let col = if self.view.wrap { col } else { self.view.left_col + col };
         Some(self.pos_at_visual(line, row, col))
     }
@@ -226,28 +245,9 @@ impl<'a> Doc<'a> {
 
     /// Moves by `delta` visual rows, keeping the goal column.
     pub fn move_rows(&mut self, delta: isize) {
-        let (mut line, mut row, col) = self.visual_pos(self.pos());
+        let (line, row, col) = self.visual_pos(self.pos());
         let goal = self.view.cursor.goal_col.unwrap_or(col);
-        let last_line = self.buf.len_lines().saturating_sub(1);
-        for _ in 0..delta.unsigned_abs() {
-            if delta < 0 {
-                if row > 0 {
-                    row -= 1;
-                } else if line > 0 {
-                    line -= 1;
-                    row = self.line_rows(line) - 1;
-                } else {
-                    break;
-                }
-            } else if row + 1 < self.line_rows(line) {
-                row += 1;
-            } else if line < last_line {
-                line += 1;
-                row = 0;
-            } else {
-                break;
-            }
-        }
+        let (line, row) = self.step_rows((line, row), delta);
         self.view.cursor.pos = self.pos_at_visual(line, row, goal);
         self.view.cursor.goal_col = Some(goal);
     }

@@ -258,13 +258,16 @@ fn test_tree_sitter_syntax_highlighting() {
         buf.set_mode(editor.modes.for_path(Some(Path::new(path))));
         buf
     };
+    let lines = |buf: &Buffer, lines: std::ops::Range<usize>| -> Vec<_> {
+        lines.map(|l| buf.line_to_char(l)..buf.line_end(l)).collect()
+    };
     let has = |tokens: &[ted_core::SyntaxToken], kind: SyntaxKind, cols: Option<(usize, usize)>| {
         tokens.iter().any(|t| t.kind == kind && cols.is_none_or(|(s, e)| t.start_col == s && t.end_col == e))
     };
 
     // Rust
     let mut rust = buffer("fn main() {\n    let x = 42;\n}\n", "main.rs");
-    let tokens = rust.highlight(0..3);
+    let tokens = rust.highlight(&lines(&rust, 0..3));
     assert!(has(&tokens[0], SyntaxKind::Keyword, Some((0, 2)))); // fn
     assert!(has(&tokens[0], SyntaxKind::Function, Some((3, 7)))); // main
     assert!(has(&tokens[1], SyntaxKind::Keyword, Some((4, 7)))); // let
@@ -274,16 +277,20 @@ fn test_tree_sitter_syntax_highlighting() {
 
     // Incremental edits keep highlighting correct
     rust.insert(12, "    let s = \"hello\";\n");
-    let tokens = rust.highlight(0..4);
+    let tokens = rust.highlight(&lines(&rust, 0..4));
     assert!(has(&tokens[1], SyntaxKind::StringLiteral, None));
 
     // Python, Go, C
-    let tokens = buffer("def greet(name):\n    return 123\n", "script.py").highlight(0..2);
+    let highlight = |text: &str, path: &str, n: usize| {
+        let mut buf = buffer(text, path);
+        buf.highlight(&lines(&buf, 0..n))
+    };
+    let tokens = highlight("def greet(name):\n    return 123\n", "script.py", 2);
     assert!(has(&tokens[0], SyntaxKind::Keyword, None));
     assert!(has(&tokens[0], SyntaxKind::Function, None));
-    let tokens = buffer("package main\n\nfunc add(a int) int {\n    return a + 1\n}\n", "main.go").highlight(0..5);
+    let tokens = highlight("package main\n\nfunc add(a int) int {\n    return a + 1\n}\n", "main.go", 5);
     assert!(has(&tokens[0], SyntaxKind::Keyword, None));
-    let tokens = buffer("int main() {\n    return 0;\n}\n", "main.c").highlight(0..3);
+    let tokens = highlight("int main() {\n    return 0;\n}\n", "main.c", 3);
     assert!(has(&tokens[0], SyntaxKind::Type, None));
     assert!(has(&tokens[0], SyntaxKind::Function, None));
 }
@@ -763,7 +770,8 @@ fn test_markdown_heading_highlight() {
         "# Heading 1\nParagraph text\n## Subheading\n- [x] Done\n- [ ] Todo\n```rust\nfn main() {}\n```\n",
     );
     let tree = syntax::parse_rope(&mut parser, &rope, None).unwrap();
-    let tokens = syntax::highlight_lines(&tree, &grammar, &rope, 0..8);
+    let lines: Vec<_> = (0..8).map(|l| rope.line_to_char(l)..rope.line_to_char(l + 1) - 1).collect();
+    let tokens = syntax::highlight_ranges(&tree, &grammar, &rope, &lines);
     let has = |line: usize, kind: SyntaxKind, s: usize, e: usize| {
         tokens[line].iter().any(|t| t.kind == kind && t.start_col == s && t.end_col == e)
     };
@@ -777,6 +785,25 @@ fn test_markdown_heading_highlight() {
     assert!(has(4, SyntaxKind::Punctuation, 2, 5));
     assert!(has(5, SyntaxKind::Keyword, 3, 7));
     assert!(tokens[6].iter().any(|t| t.kind == SyntaxKind::StringLiteral));
+}
+
+/// A wrapped line taller than the window scrolls within itself to keep the cursor on screen.
+#[test]
+fn test_cursor_deep_in_a_tall_wrapped_line_stays_on_screen() {
+    let text = format!("short\n{}\nend\n", "A".repeat(100_000));
+    let mut editor = editor_with(&text);
+    editor.active_view_mut().wrap = true;
+    let mut frame = Frame::new(800.0, 624.0, Color::BLACK);
+    editor.render(&mut frame, Metrics::new(9.0, 20.0));
+
+    let end = editor.active_buffer().line_end(1);
+    editor.doc().set_cursor(end);
+    editor.render(&mut frame, Metrics::new(9.0, 20.0));
+    let view = editor.active_view();
+    assert_eq!(view.top_line, 1);
+    assert!(view.top_row > 0);
+    let c = frame.cursor.expect("cursor on screen");
+    assert!(c.y >= 0.0 && c.y + c.h <= 624.0 - 20.0, "cursor must not be under the modeline");
 }
 
 #[test]
