@@ -6,6 +6,7 @@
 mod decorations;
 mod edits;
 mod history;
+mod journal;
 mod search;
 mod styled;
 
@@ -23,6 +24,8 @@ pub use decorations::{Decoration, Decorations};
 pub use edits::{map_pos, Edit};
 pub use history::{EditGroup, EditKind, TreeDisplayLine, UndoNode, UndoTree};
 pub use styled::StyledText;
+
+use journal::Journal;
 
 use crate::ext::Extensions;
 use crate::keymap::KeymapId;
@@ -62,6 +65,8 @@ pub struct Buffer {
     syntax: Option<Syntax>,
     /// Bumped by every text change, so observers (language servers) can tell what they saw.
     version: u64,
+    /// The recent changes, to catch observers up from the version they saw.
+    journal: Journal,
     decorations: Decorations,
     locals: Extensions,
     renderer: Option<Box<dyn BufferRenderer>>,
@@ -99,6 +104,7 @@ impl Buffer {
             disk_mtime: None,
             syntax: None,
             version: 0,
+            journal: Journal::default(),
             decorations: Decorations::default(),
             locals: Extensions::default(),
             renderer: None,
@@ -278,6 +284,19 @@ impl Buffer {
         self.version
     }
 
+    /// The changes since `version`, in order, each in the text as it was just before it:
+    /// replayed on the text of `version`, they give the current text. `None` once they
+    /// are no longer all remembered.
+    pub fn changes_since(&self, version: u64) -> Option<impl ExactSizeIterator<Item = &Edit>> {
+        self.journal.since(version, self.version)
+    }
+
+    /// Records the change `edit` made to the text.
+    fn changed(&mut self, edit: Edit) {
+        self.journal.record(self.version, edit);
+        self.version += 1;
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.pending || self.saved_content != Some(self.history.current_content_id())
     }
@@ -364,7 +383,7 @@ impl Buffer {
         self.text.insert(idx, text);
         self.decorations.on_insert(idx, text.chars().count());
         self.pending = true;
-        self.version += 1;
+        self.changed(Edit::new(idx..idx, text));
     }
 
     pub fn remove(&mut self, range: Range<usize>) {
@@ -383,7 +402,7 @@ impl Buffer {
         self.text.remove(start..end);
         self.decorations.on_remove(start..end);
         self.pending = true;
-        self.version += 1;
+        self.changed(Edit::new(start..end, ""));
     }
 
     /// Replaces the whole text and starts a fresh, clean history (used by generated
@@ -393,8 +412,8 @@ impl Buffer {
     }
 
     fn replace_text(&mut self, text: Rope) {
+        self.changed(journal::diff(&self.text, &text));
         self.text = text;
-        self.version += 1;
         self.decorations.clear_all();
         if let Some(syntax) = &mut self.syntax {
             syntax.invalidate();
@@ -410,7 +429,7 @@ impl Buffer {
             syntax.edit_insert(&self.text, start, text);
         }
         self.text.insert(start, text);
-        self.version += 1;
+        self.changed(Edit::new(start..start, text));
         self.reset_history();
         start..self.text.len_chars()
     }
@@ -551,8 +570,8 @@ impl Buffer {
 
     fn apply_history_state(&mut self, state: Option<(Rope, usize)>) -> Option<usize> {
         let (rope, cursor) = state?;
+        self.changed(journal::diff(&self.text, &rope));
         self.text = rope;
-        self.version += 1;
         self.decorations.clamp(self.text.len_chars());
         if let Some(syntax) = &mut self.syntax {
             syntax.invalidate();

@@ -24,7 +24,7 @@ use crate::kill_ring::KillRing;
 use crate::layout::Layout;
 use crate::mode::{IndentStyle, Indentation, Mode, ModeOverrides, ModeRegistry};
 use crate::plugin::{Hooks, Plugin};
-use crate::project::Project;
+use crate::project::{FileLists, Project};
 use crate::recentf::RecentFiles;
 use crate::settings::{self, Settings, Value};
 use crate::theme::Theme;
@@ -357,6 +357,11 @@ impl Editor {
     /// The project of the active buffer's working directory.
     pub fn project(&self) -> Project {
         self.active_buffer().project()
+    }
+
+    /// Every project's cached file list; see `project::FileLists`.
+    pub fn file_lists(&mut self) -> FileLists {
+        self.ext_mut::<FileLists>().clone()
     }
 
     /// The active view and its buffer, for editing.

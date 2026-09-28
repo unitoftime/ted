@@ -4,11 +4,21 @@
 //! enclosing git repository, else that directory alone. Commands that look across files
 //! (xref, compile, git, the buffer switcher) resolve the project with `Editor::project`
 //! rather than each deciding where to run.
+//!
+//! Listing a large repository takes a while, so the last listing of each project is kept
+//! in `FileLists` and refreshed in the background whenever it is used: the file switcher
+//! opens populated, and new files show up once the refresh lands.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
+use std::sync::Arc;
 
+use parking_lot::Mutex;
+
+use crate::editor::Editor;
 use crate::text::directory_of;
 
 /// Files listed per project at most.
@@ -88,4 +98,53 @@ impl Project {
         }
         files
     }
+}
+
+/// A project's files, relative to its root; `None` while its first listing runs.
+type Listing = Option<Arc<[PathBuf]>>;
+
+/// Each project's files (relative to its root) as last listed, shared with job threads.
+/// Get it with `Editor::file_lists`.
+#[derive(Clone, Default)]
+pub struct FileLists {
+    by_root: Arc<Mutex<HashMap<PathBuf, Listing>>>,
+}
+
+impl FileLists {
+    /// The project's files as last listed, if they have been.
+    pub fn cached(&self, project: &Project) -> Option<Arc<[PathBuf]>> {
+        self.by_root.lock().get(&project.root).cloned().flatten()
+    }
+
+    /// Lists the project's files now and keeps the result. Blocks; call it from a job.
+    pub fn list(&self, project: &Project) -> Arc<[PathBuf]> {
+        let files: Arc<[PathBuf]> = project.files().into();
+        self.by_root.lock().insert(project.root.clone(), Some(files.clone()));
+        files
+    }
+
+    /// Lists the project in the background unless it is listed or being listed.
+    fn warm(&self, ed: &Editor, project: &Project) {
+        let mut by_root = self.by_root.lock();
+        if by_root.contains_key(&project.root) {
+            return;
+        }
+        by_root.insert(project.root.clone(), None);
+        drop(by_root);
+        let (lists, project) = (self.clone(), project.clone());
+        ed.spawn(move |_| {
+            lists.list(&project);
+        });
+    }
+}
+
+pub(crate) fn register(ed: &mut Editor) {
+    // So the first file switcher in a repository opens with its files.
+    ed.hooks.buffer_opened.push(Rc::new(|ed, id| {
+        let project = ed.buffers[id].project();
+        if project.is_git() {
+            let lists = ed.file_lists();
+            lists.warm(ed, &project);
+        }
+    }));
 }

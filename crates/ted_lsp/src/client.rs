@@ -5,18 +5,21 @@
 //! response to `on_response`, which runs it. Messages sent while the server is still
 //! initializing are queued and flushed once it is ready.
 //!
-//! Documents are synced whole: the server gets a buffer's full text when its version has
-//! changed, once it has been stable for one sync tick, and right before any request about
-//! it (`prepare`).
+//! Documents are synced when a buffer's version has changed, once it has been stable for
+//! one sync tick, and right before any request about it (`prepare`). A server that takes
+//! incremental changes gets the buffer's journal of edits since the version it has,
+//! replayed on a copy of its text to place them; otherwise, or when the journal no longer
+//! reaches back that far, it gets the whole text.
 
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::{Path, PathBuf};
 
+use ropey::Rope;
 use serde_json::{json, Value};
 use ted_core::completion::TriggerChars;
 use ted_core::text::collapse_tilde;
-use ted_core::{BufferId, Editor};
+use ted_core::{BufferId, Edit, Editor};
 
 use crate::protocol::{path_to_uri, Encoding};
 use crate::servers::{config_json, ServerSpec};
@@ -44,17 +47,22 @@ pub struct Capabilities {
     pub rename: bool,
     pub formatting: bool,
     pub range_formatting: bool,
+    /// Takes the edits made to a document rather than its whole text.
+    pub incremental_sync: bool,
 }
 
 impl Capabilities {
     fn from_json(caps: &Value) -> Self {
         let provides = |name| !matches!(caps.get(name), None | Some(Value::Null) | Some(Value::Bool(false)));
+        // A `TextDocumentSyncKind`, alone or in an options object; 2 is incremental.
+        let sync = caps.get("textDocumentSync").and_then(|s| s.as_u64().or_else(|| s.get("change")?.as_u64()));
         Self {
             completion: provides("completionProvider"),
             hover: provides("hoverProvider"),
             rename: provides("renameProvider"),
             formatting: provides("documentFormattingProvider"),
             range_formatting: provides("documentRangeFormattingProvider"),
+            incremental_sync: sync == Some(2),
         }
     }
 }
@@ -103,6 +111,8 @@ pub struct Document {
     sent: u64,
     /// Buffer version seen at the last sync tick; syncing waits until it holds still.
     seen: u64,
+    /// The text the server has (version `sent`), to place incremental changes in.
+    text: Rope,
 }
 
 #[derive(Default)]
@@ -181,9 +191,9 @@ pub fn attach(ed: &mut Editor, id: BufferId) {
     let (version, text) = (buf.version(), buf.text().clone());
     let uri = path_to_uri(&path);
     let lsp = ed.ext_mut::<Lsp>();
-    let open = Outgoing::Open { uri: uri.clone(), language: spec.language_id(&path), version, text };
+    let open = Outgoing::Open { uri: uri.clone(), language: spec.language_id(&path), version, text: text.clone() };
     lsp.clients[server].send(open);
-    lsp.docs.insert(id, Document { server, uri, sent: version, seen: version });
+    lsp.docs.insert(id, Document { server, uri, sent: version, seen: version, text });
     let keymap = handles(ed).keymap;
     ed.buffers[id].enable_keymap(keymap);
     set_triggers(ed, id);
@@ -224,20 +234,59 @@ pub fn did_save(ed: &mut Editor, id: BufferId) {
     }
 }
 
-/// Sends buffer `id`'s text if the server's copy is out of date.
+/// Brings the server's copy of buffer `id` up to date, if it isn't.
 pub fn sync(ed: &mut Editor, id: BufferId) {
-    let Some(buf) = ed.buffers.get(id) else {
+    let (Some(buf), Some(lsp)) = (ed.buffers.get(id), ed.ext::<Lsp>()) else {
         return;
     };
     let (version, text) = (buf.version(), buf.text().clone());
-    let lsp = ed.ext_mut::<Lsp>();
-    let Some(doc) = lsp.docs.get_mut(&id).filter(|doc| doc.sent != version) else {
+    let Some(doc) = lsp.docs.get(&id).filter(|doc| doc.sent != version) else {
         return;
     };
-    doc.sent = version;
-    doc.seen = version;
-    let change = Outgoing::Change { uri: doc.uri.clone(), version, text };
+    let client = &lsp.clients[doc.server];
+    let edits = buf.changes_since(doc.sent).filter(|_| client.capabilities.incremental_sync);
+    let change = match edits.and_then(|edits| content_changes(&doc.text, edits, client.encoding, &text)) {
+        Some(changes) => {
+            let params = json!({
+                "textDocument": { "uri": doc.uri, "version": version },
+                "contentChanges": changes,
+            });
+            Outgoing::notification("textDocument/didChange", params)
+        }
+        None => Outgoing::Change { uri: doc.uri.clone(), version, text: text.clone() },
+    };
+    let lsp = ed.ext_mut::<Lsp>();
+    let Some(doc) = lsp.docs.get_mut(&id) else {
+        return;
+    };
+    (doc.sent, doc.seen, doc.text) = (version, version, text);
     lsp.clients[doc.server].send(change);
+}
+
+/// `edits` as `contentChanges`, each placed in `text` (the server's copy) as the ones
+/// before it left it. `None` if they don't lead to `current`, so the whole text must go.
+fn content_changes<'a>(
+    text: &Rope,
+    edits: impl Iterator<Item = &'a Edit>,
+    encoding: Encoding,
+    current: &Rope,
+) -> Option<Vec<Value>> {
+    let mut text = text.clone();
+    let mut changes = Vec::new();
+    for edit in edits {
+        let (start, end) = (edit.range.start, edit.range.end);
+        if start > end || end > text.len_chars() {
+            return None;
+        }
+        let range = json!({
+            "start": encoding.position_in(&text, start).to_json(),
+            "end": encoding.position_in(&text, end).to_json(),
+        });
+        text.remove(start..end);
+        text.insert(start, &edit.text);
+        changes.push(json!({ "range": range, "text": edit.text }));
+    }
+    (text.len_bytes() == current.len_bytes() && text.len_chars() == current.len_chars()).then_some(changes)
 }
 
 /// Sync tick: sends documents whose text changed and has held still since the last tick,

@@ -4,6 +4,7 @@
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
+use ropey::Rope;
 use serde_json::{json, Value};
 use ted_core::{Buffer, Edit};
 
@@ -48,8 +49,14 @@ impl Encoding {
 
     /// The server's position of char `pos` of `buf`.
     pub fn position(self, buf: &Buffer, pos: usize) -> Position {
-        let (line, col) = buf.char_to_point(pos);
-        Position { line, col: self.to_units(buf.line(line).chars(), col) }
+        self.position_in(buf.text(), pos)
+    }
+
+    /// The server's position of char `pos` of `text`.
+    pub fn position_in(self, text: &Rope, pos: usize) -> Position {
+        let line = text.char_to_line(pos);
+        let col = pos - text.line_to_char(line);
+        Position { line, col: self.to_units(text.line(line).chars(), col) }
     }
 
     /// The char of `buf` at the server's position `p`, clamped to the text.

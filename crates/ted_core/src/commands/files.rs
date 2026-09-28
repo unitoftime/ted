@@ -272,18 +272,32 @@ fn buffer_switcher(ed: &mut Editor) {
         .filter_map(|(_, b)| Some(b.path()?.strip_prefix(&project.root).ok()?.to_path_buf()))
         .collect();
     let here = ed.active_buffer().directory();
-    let picker = picker.load_in_background(ed, move || project_files_near(&project, &here, &open));
+    let lists = ed.file_lists();
+    let cached = lists.cached(&project);
+    let picker = picker.load_in_background(ed, move |feed| {
+        let cached = cached.as_deref().unwrap_or_default();
+        if !cached.is_empty() && !feed.send(project_files_near(&project, &here, cached.iter(), &open)) {
+            return;
+        }
+        // The files that appeared since the last listing.
+        let fresh = lists.list(&project);
+        let known: HashSet<&PathBuf> = cached.iter().collect();
+        feed.send(project_files_near(&project, &here, fresh.iter().filter(|f| !known.contains(f)), &open));
+    });
     ed.push_modal(picker);
 }
 
-/// Job thread: the project's files not in `open` (relative to the root), by directory
+/// Job thread: `files` of the project (relative to the root) not in `open`, by directory
 /// distance from `here`.
-fn project_files_near(project: &Project, here: &Path, open: &HashSet<PathBuf>) -> Vec<(PickerItem, Target)> {
+fn project_files_near<'a>(
+    project: &Project,
+    here: &Path,
+    files: impl Iterator<Item = &'a PathBuf>,
+    open: &HashSet<PathBuf>,
+) -> Vec<(PickerItem, Target)> {
     let here: Vec<_> = here.strip_prefix(&project.root).map(|p| p.components().collect()).unwrap_or_default();
-    let mut files: Vec<(usize, PathBuf)> = project
-        .files()
-        .into_iter()
-        .filter(|rel| !open.contains(rel))
+    let mut files: Vec<(usize, &PathBuf)> = files
+        .filter(|rel| !open.contains(*rel))
         .map(|rel| {
             let dir = rel.parent().map_or(0, |d| d.components().count());
             let shared = rel.components().zip(&here).take_while(|(a, b)| a == *b).count().min(dir);

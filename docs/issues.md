@@ -30,11 +30,11 @@
   watcher would be event-driven.
 - [x] Decorations shift in O(n) per edit and are queried linearly. An interval tree would
   scale to the thousands a language server can produce.
-- [ ] Language server documents sync as full text. Incremental sync needs an edit journal on
+- [x] Language server documents sync as full text. Incremental sync needs an edit journal on
   `Buffer`.
-- [ ] The tags backend re-reads the project on every query. A per-file tag cache keyed by
+- [x] The tags backend re-reads the project on every query. A per-file tag cache keyed by
   modification time would make large repositories instant.
-- [ ] `Project::files` re-lists the project on every call. A cached list refreshed in the
+- [x] `Project::files` re-lists the project on every call. A cached list refreshed in the
   background would open the file switcher fully populated.
 
 ## Smaller items

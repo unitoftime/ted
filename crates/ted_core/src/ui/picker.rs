@@ -71,7 +71,7 @@ struct Live {
     clear_values: fn(&mut dyn Any),
 }
 
-/// A live picker's search reports its results through this, from any thread.
+/// A picker's background search or load reports its results through this, from any thread.
 pub struct Feed<T> {
     ctx: JobContext,
     id: String,
@@ -239,26 +239,20 @@ impl Picker {
         self
     }
 
-    /// Runs `load` on a job thread and adds the entries it returns (values of the type the
-    /// picker was made with). The title shows the picker is loading until they arrive;
-    /// closing the picker first cancels the job.
+    /// Runs `load` on a job thread; it adds entries (values of the type the picker was
+    /// made with) through its `Feed`, in as many batches as it likes. The title shows the
+    /// picker is loading until `load` returns; closing the picker first cancels the job.
     pub fn load_in_background<T: Send + 'static>(
         mut self,
         ed: &Editor,
-        load: impl FnOnce() -> Vec<(PickerItem, T)> + Send + 'static,
+        load: impl FnOnce(&Feed<T>) + Send + 'static,
     ) -> Self {
         let id = self.id.clone();
-        let job = ed.spawn(move |ctx| {
-            let entries = load();
-            ctx.send(move |ed| {
-                ed.with_modal::<Picker, _>(|picker, _| {
-                    if picker.id == id && picker.loading.take().is_some() {
-                        picker.extend(entries);
-                    }
-                });
-            });
-        });
-        self.loading = Some(job);
+        self.loading = Some(ed.spawn(move |ctx| {
+            let feed = Feed { ctx, id, _values: PhantomData };
+            load(&feed);
+            feed.finish();
+        }));
         self
     }
 
