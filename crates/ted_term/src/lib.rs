@@ -112,11 +112,37 @@ const VIEW_MODE: &str = "Terminal View";
 /// Lines scrolled per wheel notch when the program handles scrolling itself.
 const WHEEL_LINES: usize = 3;
 
+/// The first of "terminal", "terminal 2", ... no buffer of the active workspace has, so
+/// each workspace numbers its own terminals.
 fn unique_name(ed: &Editor) -> String {
+    let taken = ed.workspaces.active().buffers();
     (1..)
         .map(|n| if n == 1 { "terminal".to_string() } else { format!("terminal {}", n) })
-        .find(|name| ed.buffers.find(|b| b.name() == name).is_none())
+        .find(|name| taken.iter().all(|&id| ed.buffers[id].name() != name))
         .expect("some name is free")
+}
+
+/// Shows the active workspace's terminal `step` places from the active one, in the order
+/// of their numbers and wrapping around, in the active window.
+fn cycle(ed: &mut Editor, step: isize) {
+    let is_terminal = |id| ed.buffers[id].local::<TermBuffer>().is_some_and(|t| t.0.is_some());
+    let mut terminals: Vec<BufferId> =
+        ed.workspaces.active().buffers().iter().copied().filter(|&id| is_terminal(id)).collect();
+    if terminals.is_empty() {
+        return ed.set_status("No terminals in this workspace");
+    }
+    // Shorter names first puts "terminal 10" after "terminal 9".
+    terminals.sort_by(|&a, &b| {
+        let (a, b) = (ed.buffers[a].name(), ed.buffers[b].name());
+        a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+    });
+    let len = terminals.len() as isize;
+    let next = match terminals.iter().position(|&id| id == ed.active_buffer_id()) {
+        Some(i) => (i as isize + step).rem_euclid(len),
+        None if step > 0 => 0,
+        None => len - 1,
+    };
+    ed.show_in_active_view(terminals[next as usize]);
 }
 
 /// Opens a terminal in the active buffer's working directory: terminal `attach` (one an
@@ -363,6 +389,8 @@ impl Plugin for TermPlugin {
         });
         c.register_hidden("term-send-key", "Send the typed key to the terminal program", send_key);
         c.register("term-paste", "Paste the clipboard into the terminal", |ed, _| paste(ed));
+        c.register("term-next", "Show the workspace's next terminal", |ed, _| cycle(ed, 1));
+        c.register("term-previous", "Show the workspace's previous terminal", |ed, _| cycle(ed, -1));
         c.register("term-view-mode", "Freeze the terminal to navigate it with editor keys", |ed, _| {
             let id = ed.active_buffer_id();
             view_mode(ed, id);
