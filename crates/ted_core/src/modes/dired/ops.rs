@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{entry_at_point, focus_entry, listed_dir, refresh_all, Dired};
+use crate::commands::external_changes;
 use crate::commands::files::{anchor_directory, complete_path};
 use crate::editor::Editor;
 use crate::rows::{self, Rows};
@@ -202,7 +203,8 @@ fn run_transfer(ed: &mut Editor, kind: Transfer, dir: &Path, plan: Vec<(Source, 
 
 /// Points buffers visiting `from` (or anything inside it) at the moved location.
 fn follow_move(ed: &mut Editor, from: &Path, to: &Path) {
-    for (_, buf) in ed.buffers.iter_mut() {
+    let mut moved_ids = Vec::new();
+    for (id, buf) in ed.buffers.iter_mut() {
         let Some(rest) = buf.path().and_then(|p| p.strip_prefix(from).ok()) else { continue };
         let moved = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
         let listing = buf.local::<Dired>().is_some();
@@ -211,6 +213,10 @@ fn follow_move(ed: &mut Editor, from: &Path, to: &Path) {
             let name = format!("{}/", buf.name().trim_end_matches('/'));
             buf.set_name(name);
         }
+        moved_ids.push(id);
+    }
+    for id in moved_ids {
+        external_changes::track(ed, id);
     }
 }
 

@@ -26,9 +26,9 @@
 ## Performance
 
 - [x] Very long lines are laid out in full on every frame.
-- [ ] External file changes are detected by polling modification times every 500ms. A file
+- [x] External file changes are detected by polling modification times every 500ms. A file
   watcher would be event-driven.
-- [ ] Decorations shift in O(n) per edit and are queried linearly. An interval tree would
+- [x] Decorations shift in O(n) per edit and are queried linearly. An interval tree would
   scale to the thousands a language server can produce.
 - [ ] Language server documents sync as full text. Incremental sync needs an edit journal on
   `Buffer`.

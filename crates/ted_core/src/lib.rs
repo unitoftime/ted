@@ -50,6 +50,7 @@ pub mod text;
 pub mod theme;
 pub mod ui;
 pub mod view;
+pub mod watch;
 pub mod xref;
 
 pub use buffer::{Buffer, BufferId, Buffers, Decoration, Edit, Margin, StyledText};

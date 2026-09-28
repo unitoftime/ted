@@ -84,7 +84,7 @@ impl Doc<'_> {
         let line_face = mode.line_face.clone();
         // One past the last range covers decorations on its newline.
         let visible_chars = ranges.first().map_or(0, |r| r.start)..ranges.last().map_or(0, |r| r.end + 1);
-        let decorations: Vec<_> = self.buf.decorations().overlapping(visible_chars).cloned().collect();
+        let decorations: Vec<_> = self.buf.decorations().overlapping(visible_chars).collect();
         // Highlighting just parsed, so the tree is current.
         let brackets =
             if focused { brackets::matching_pair(self.buf.text(), self.buf.syntax_tree(), self.pos()) } else { None };

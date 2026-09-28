@@ -1,10 +1,9 @@
-//! Files and buffers: visiting, saving, switching, killing, reverting, and reacting to
-//! changes made on disk by other programs.
+//! Files and buffers: visiting, saving, switching, killing and reverting.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
+use super::external_changes;
 use crate::buffer::BufferId;
 use crate::command::Arg;
 use crate::editor::Editor;
@@ -56,9 +55,6 @@ pub fn register(ed: &mut Editor) {
     c.register("revert-buffer", "Refresh the buffer from its source (file, directory, command)", |ed, _| {
         revert(ed);
     });
-    ed.add_timer(Duration::from_millis(500), check_external_changes);
-
-    let c = &mut ed.commands;
     c.register("exit-ted", "Exit ted after confirmation, offering to save modified files", |ed, _| {
         if modified_files(ed).is_empty() {
             ed.confirm("exit", "Are you sure you want to exit ted? (y/n) ", |ed, yes| {
@@ -257,7 +253,7 @@ fn buffer_switcher(ed: &mut Editor) {
             let name = ed.buffers[id].name().to_string();
             ed.show_buffer(id);
             ed.set_status(format!("Switched to buffer {}", name));
-            check_external_changes(ed);
+            external_changes::check_all(ed);
         }
         Target::Buffer(_) => {}
         Target::File(path) => {
@@ -339,59 +335,4 @@ fn revert(ed: &mut Editor) {
         }
         Err(e) => ed.set_status(format!("Error reverting buffer: {}", e)),
     }
-}
-
-/// Reloads clean buffers whose files changed on disk. If the active buffer has unsaved
-/// edits and its file changed, asks which version to keep. Returns whether anything
-/// was reloaded or a question was asked.
-pub fn check_external_changes(ed: &mut Editor) -> bool {
-    let active = ed.active_buffer_id();
-    let mut reloaded = false;
-    let mut conflict = None;
-    for id in ed.buffers.ids() {
-        let buf = &mut ed.buffers[id];
-        if !buf.is_modified_on_disk() {
-            continue;
-        }
-        if buf.is_dirty() {
-            if id == active {
-                conflict = Some(id);
-            }
-            continue;
-        }
-        let name = buf.name().to_string();
-        if buf.reload_from_disk().is_ok() {
-            ed.clamp_views(id);
-            ed.set_status(format!("Auto-reloaded {} from disk", name));
-            reloaded = true;
-        }
-    }
-
-    let Some(id) = conflict.filter(|_| !ed.has_modal()) else {
-        return reloaded;
-    };
-    let name = ed.buffers[id].name().to_string();
-    let label = format!("{} modified on disk. (r)eload disk version or (k)eep buffer edits? (r/k): ", name);
-    let keep_name = name.clone();
-    let choice = Choice::new("resolve-conflict", label, "rkyn", move |ed, key| {
-        if matches!(key, 'r' | 'y') {
-            match ed.buffers[id].reload_from_disk() {
-                Ok(()) => {
-                    ed.clamp_views(id);
-                    ed.set_status(format!("Reloaded {} from disk (discarded local edits)", name));
-                }
-                Err(_) => ed.set_status(format!("Error reloading {} from disk", name)),
-            }
-        } else {
-            keep_local(ed, id, &name);
-        }
-    })
-    .on_cancel(move |ed| keep_local(ed, id, &keep_name));
-    ed.push_modal(choice);
-    true
-}
-
-fn keep_local(ed: &mut Editor, id: BufferId, name: &str) {
-    ed.buffers[id].acknowledge_disk_version();
-    ed.set_status(format!("Kept local edits for {}", name));
 }

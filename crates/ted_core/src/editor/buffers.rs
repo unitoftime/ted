@@ -237,8 +237,9 @@ impl Editor {
         crate::commands::files::save_some_buffers(self, |ed| ed.running = false);
     }
 
+    /// Checks every buffer against its file on disk; see `commands::external_changes`.
     pub fn check_external_changes(&mut self) -> bool {
-        crate::commands::files::check_external_changes(self)
+        crate::commands::external_changes::check_all(self)
     }
 
     fn run_buffer_hooks(&mut self, select: impl Fn(&Hooks) -> &Vec<crate::plugin::BufferHook>, id: BufferId) {

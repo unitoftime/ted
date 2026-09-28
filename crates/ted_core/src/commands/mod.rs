@@ -3,6 +3,7 @@
 
 pub mod bindings;
 pub mod edit;
+pub mod external_changes;
 pub mod files;
 pub mod help;
 pub mod jump;
@@ -19,6 +20,7 @@ pub(crate) fn register_builtin(ed: &mut Editor) {
     motion::register(ed);
     edit::register(ed);
     files::register(ed);
+    external_changes::register(ed);
     windows::register(ed);
     search::register(ed);
     help::register(ed);
