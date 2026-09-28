@@ -1,5 +1,5 @@
 //! Diagnostics: the server's errors and warnings, underlined in open buffers, echoed when
-//! the cursor lands on one, and listed in `*diagnostics*` (`C-c !`), a location list that
+//! the cursor lands on one, and listed in `diagnostics` (`C-c !`), a location list that
 //! `next-error` steps through. `set("lsp.diagnostics", false)` or
 //! `lsp-toggle-diagnostics` turns the display off; they are still collected.
 
@@ -15,7 +15,7 @@ use crate::handles;
 use crate::protocol::{range_from_json, uri_to_path, Encoding, Position};
 
 const LAYER: &str = "lsp-diagnostics";
-const LIST_BUFFER: &str = "*diagnostics*";
+const LIST_BUFFER: &str = "diagnostics";
 const LIST_MODE: &str = "Diagnostics";
 
 pub struct Diagnostic {
@@ -176,7 +176,7 @@ pub fn echo(ed: &mut Editor) {
     }
 }
 
-/// Writes every file's diagnostics into the `*diagnostics*` list, by file and position.
+/// Writes every file's diagnostics into the `diagnostics` list, by file and position.
 fn fill_list(ed: &mut Editor) -> BufferId {
     let mut items = Vec::new();
     if let Some(store) = ed.ext::<Store>() {

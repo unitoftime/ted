@@ -47,7 +47,7 @@ fn type_line(ed: &mut Editor, line: &str) {
 fn terminal_runs_commands_and_switches_to_view_mode() {
     let mut ed = editor();
     ed.execute("term");
-    assert_eq!(ed.active_buffer().name(), "*terminal*");
+    assert_eq!(ed.active_buffer().name(), "terminal");
     assert_eq!(ed.active_buffer().mode().name, "Terminal");
 
     // Keys go to the shell; output shows up on the live screen
@@ -62,7 +62,7 @@ fn terminal_runs_commands_and_switches_to_view_mode() {
     ed.handle_key(KeyEvent::alt('x'));
     assert_eq!(ed.top_modal().map(|m| m.id().to_string()).as_deref(), Some("execute-extended-command"));
     ed.handle_key(KeyEvent::plain(KeyCode::Escape));
-    assert_eq!(ed.active_buffer().name(), "*terminal*");
+    assert_eq!(ed.active_buffer().name(), "terminal");
 
     // Keys bound in the terminal keymap (as init.rhai does) win over passing them through
     ed.bind("terminal", "M-]", "other-window").unwrap();
@@ -109,6 +109,6 @@ fn terminal_runs_commands_and_switches_to_view_mode() {
     // C-d exits the shell, closing the terminal and returning to the previous buffer
     ed.handle_key(KeyEvent::ctrl('d'));
     wait_until(&mut ed, "exit", |ed| ed.active_buffer().is_scratch());
-    assert!(ed.buffers.find(|b| b.name() == "*terminal*").is_none());
-    assert_eq!(ed.status, "*terminal* exited");
+    assert!(ed.buffers.find(|b| b.name() == "terminal").is_none());
+    assert_eq!(ed.status, "terminal exited");
 }

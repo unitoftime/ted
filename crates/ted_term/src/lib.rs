@@ -59,7 +59,7 @@ const WHEEL_LINES: usize = 3;
 
 fn unique_name(ed: &Editor) -> String {
     (1..)
-        .map(|n| if n == 1 { "*terminal*".to_string() } else { format!("*terminal<{}>*", n) })
+        .map(|n| if n == 1 { "terminal".to_string() } else { format!("terminal {}", n) })
         .find(|name| ed.buffers.find(|b| b.name() == name).is_none())
         .expect("some name is free")
 }

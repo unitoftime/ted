@@ -5,7 +5,7 @@
 //! a server that is missing, still indexing, or stumped.
 //!
 //! One definition is visited directly and several are offered in a picker; references fill
-//! the `*xref*` location list, so `next-error` steps through them. Every jump pushes the
+//! the `xref` location list, so `next-error` steps through them. Every jump pushes the
 //! position it left onto the jump stack, which `xref-go-back` pops.
 
 mod tags;
@@ -22,7 +22,8 @@ use crate::ui::PickerItem;
 
 pub use tags::TagsBackend;
 
-pub const LIST_BUFFER: &str = "*xref*";
+/// The mode of the references list, a buffer named `xref: <symbol>`.
+pub const MODE: &str = "Xref";
 const MAX_JUMPS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +129,7 @@ pub(crate) fn register(ed: &mut Editor) {
     c.register("xref-go-forward", "Undo an xref-go-back", |ed, _| {
         hop(ed, false);
     });
+    ed.define_mode(locations::list_mode(MODE));
     chain::register(ed, 0, TagsBackend);
 }
 
@@ -172,7 +174,8 @@ fn present(ed: &mut Editor, query: &Query, mut items: Vec<Item>) {
                 .collect();
             let header = format!("References to '{}' in {} ({})", query.symbol, collapse_tilde(&root), list.len());
             push_mark(ed);
-            let id = locations::fill_list(ed, LIST_BUFFER, locations::MODE, &header, &list);
+            let name = format!("xref: {}", query.symbol);
+            let id = locations::fill_list(ed, &name, MODE, &header, &list);
             ed.show_buffer(id);
             ed.set_status(format!("{} references to '{}' (M-g n steps through them)", list.len(), query.symbol));
         }

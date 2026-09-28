@@ -1,166 +1,264 @@
-//! Diff buffers: `d` menu diffs and commit views. `RET` on a diff line visits that line in
-//! the working tree; `g` reruns the same git command.
+//! Diff buffers: the `d` menu's diffs and commit views, written like the status buffer's
+//! sections (`changes`): a heading per file with its hunks under it, under a commit's
+//! details or a title. `TAB` folds a file or hunk, `n` / `p` step between them, `RET`
+//! visits the line in the working tree, `s` / `u` / `k` stage, unstage or discard in
+//! diffs of unstaged or staged changes, and `g` reruns the diff.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-use ted_core::{Editor, StyledText};
+use ted_core::jobs::JobHandle;
+use ted_core::rows::{self, RowText};
+use ted_core::{BufferId, Editor, FaceId};
 
-use crate::git::args;
-use crate::model::Section;
+use crate::changes::{self, Action, Fold, Line};
+use crate::git::{args, git};
+use crate::model::{self, CommitDetails, FileDiff, Section};
 use crate::status::{self, Item};
-use crate::{generated_buffer, process, repo_name, GitFaces};
+use crate::{generated_buffer, GitFaces};
 
 pub const MODE: &str = "Git Diff";
 
-/// Buffer-local: the git command that produced this diff.
+/// What a diff buffer shows, and how to show it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    Unstaged,
+    Staged,
+    /// The working tree against HEAD.
+    Worktree,
+    /// One file's unstaged or staged changes.
+    File(Section, String),
+    Range(String),
+    Commit(String),
+    Stash(String),
+}
+
+impl Source {
+    /// The status section the changes are in, where staging and unstaging apply.
+    fn section(&self) -> Option<Section> {
+        match self {
+            Source::Unstaged => Some(Section::Unstaged),
+            Source::Staged => Some(Section::Staged),
+            Source::File(section, _) => Some(*section),
+            _ => None,
+        }
+    }
+
+    fn args(&self) -> Vec<String> {
+        let diff = |extra: &[&str]| args(&[&["diff", "--no-ext-diff"], extra].concat());
+        match self {
+            Source::Unstaged => diff(&[]),
+            Source::Staged => diff(&["--cached"]),
+            Source::Worktree => diff(&["HEAD"]),
+            Source::File(Section::Staged, path) => diff(&["--cached", "--", path]),
+            Source::File(_, path) => diff(&["--", path]),
+            Source::Range(range) => diff(&[range]),
+            Source::Commit(rev) => args(&["show", "--format=", "--no-ext-diff", "--diff-merges=first-parent", rev]),
+            Source::Stash(name) => args(&["stash", "show", "-p", "--no-ext-diff", name]),
+        }
+    }
+
+    /// The commit whose details head the diff.
+    fn commit(&self) -> Option<&str> {
+        match self {
+            Source::Commit(rev) | Source::Stash(rev) => Some(rev),
+            _ => None,
+        }
+    }
+
+    fn title(&self) -> String {
+        match self {
+            Source::Unstaged => "Unstaged changes".into(),
+            Source::Staged => "Staged changes".into(),
+            Source::Worktree => "Changes since HEAD".into(),
+            Source::File(Section::Staged, path) => format!("Staged changes to {}", path),
+            Source::File(_, path) => format!("Unstaged changes to {}", path),
+            Source::Range(range) => format!("Diff {}", range),
+            Source::Commit(rev) => format!("Commit {}", rev),
+            Source::Stash(name) => format!("Stash {}", name),
+        }
+    }
+}
+
+/// Buffer-local state of a diff buffer.
 #[derive(Default)]
 struct DiffBuffer {
-    args: Vec<String>,
+    source: Option<Source>,
+    commit: Option<CommitDetails>,
+    files: Vec<FileDiff>,
+    /// The diff line of each row.
+    lines: Vec<Line>,
+    /// Files and hunks `TAB` closed.
+    folded: HashSet<Fold>,
+    job: Option<JobHandle>,
 }
 
-/// Runs `git <git_args>` and shows the output as a colored diff in the repo's diff buffer.
-pub fn show(ed: &mut Editor, root: PathBuf, what: String, git_args: Vec<String>) {
-    let query_args = git_args.clone();
-    process::query(ed, root.clone(), query_args, move |ed, out| {
-        let faces = *ed.ext_mut::<GitFaces>();
-        let text = if out.is_empty() { "No changes.\n".to_string() } else { out };
-        let id = generated_buffer(ed, &format!("git-diff: {}", repo_name(&root)), MODE, &root);
-        let buf = &mut ed.buffers[id];
-        buf.set_styled("git", styled(&text, &faces));
-        buf.local_mut::<DiffBuffer>().args = git_args;
-        ed.show_buffer(id);
-        ed.doc().set_cursor(0);
-        ed.set_status(what);
-    });
-}
-
-fn styled(text: &str, faces: &GitFaces) -> StyledText {
-    let mut styled = StyledText::new();
-    for line in text.split_inclusive('\n') {
-        let content = line.trim_end_matches(['\r', '\n']);
-        let face = if content.starts_with("commit ") {
-            Some(faces.hash)
-        } else if content.starts_with("diff --git") || content.starts_with("+++ ") || content.starts_with("--- ") {
-            Some(faces.file_heading)
-        } else {
-            faces.diff_line(content)
-        };
-        styled.push(content, face);
-        styled.push(&line[content.len()..], None);
+impl DiffBuffer {
+    fn is_open(&self, line: Line) -> bool {
+        Fold::of(&self.files, line).is_none_or(|fold| !self.folded.contains(&fold))
     }
-    styled
 }
 
-/// `g` in a diff buffer: reruns its git command.
-pub fn refresh(ed: &mut Editor) {
-    let buf = ed.active_buffer();
-    let Some(diff) = buf.local::<DiffBuffer>() else { return };
-    let (git_args, root) = (diff.args.clone(), buf.directory());
-    show(ed, root, "Refreshed".into(), git_args);
+/// Shows `source` in the repository's diff buffer.
+pub fn show(ed: &mut Editor, root: PathBuf, source: Source) {
+    let id = generated_buffer(ed, "git diff", MODE, &root);
+    load(ed, id, root, source, true);
 }
 
-/// `RET`: visits the working-tree line of the diff line at point.
-pub fn visit(ed: &mut Editor) {
-    let root = ed.active_buffer().directory();
-    let doc = ed.doc();
-    let current = doc.buf.char_to_line(doc.pos());
-    let line_text = |l: usize| doc.buf.line_content(l).to_string();
-
-    // Walk up to the enclosing hunk header and file header.
-    let (mut new_lines, mut hunk_start, mut path) = (0, None, None);
-    for l in (0..=current).rev() {
-        let text = line_text(l);
-        if hunk_start.is_none() {
-            if text.starts_with("@@") {
-                hunk_start = Some(new_start(&text));
-            } else if l != current && !text.starts_with('-') {
-                new_lines += 1;
-            }
-        }
-        if let Some(p) = text.strip_prefix("+++ b/") {
-            path = Some(p.to_string());
-            break;
-        }
-        if text.starts_with("diff --git") {
-            path = text.rsplit_once(" b/").map(|(_, p)| p.to_string());
-            break;
-        }
-    }
-    let Some(path) = path else { return };
-    let line = hunk_start.map_or(0, |start| start.saturating_sub(1) + new_lines);
-    if let Err(e) = ed.open_file(root.join(&path)) {
-        ed.set_status(format!("Cannot open {}: {}", path, e));
+/// Reruns the diff of `root`'s diff buffer, if it has one (after staging changed it).
+pub fn refresh(ed: &mut Editor, root: PathBuf) {
+    let found = ed.buffers.find(|b| b.local::<DiffBuffer>().is_some() && b.directory() == root);
+    let Some((id, source)) = found.and_then(|id| Some((id, ed.buffers[id].local::<DiffBuffer>()?.source.clone()?)))
+    else {
         return;
+    };
+    load(ed, id, root, source, false);
+}
+
+/// `g`: reruns the active diff buffer's diff.
+pub fn rerun(ed: &mut Editor) {
+    if ed.active_buffer().local::<DiffBuffer>().is_some() {
+        refresh(ed, ed.active_buffer().directory());
     }
-    let mut doc = ed.doc();
-    let pos = doc.buf.line_to_char(line);
-    doc.set_cursor(pos);
 }
 
-fn new_start(header: &str) -> usize {
-    crate::model::Hunk { header: header.to_string(), lines: Vec::new() }.new_start()
+/// Runs `source`'s git commands in the background and writes the result into buffer `id`,
+/// showing it from the top if `show`, else keeping point on what it was on.
+fn load(ed: &mut Editor, id: BufferId, root: PathBuf, source: Source, show: bool) {
+    let job = ed.spawn(move |ctx| {
+        let commit = source.commit().map(|rev| git(&root, &model::details_args(rev), None)).transpose();
+        let diff = git(&root, &source.args(), None);
+        ctx.send(move |ed| {
+            let (commit, files) = match (commit, diff) {
+                (Ok(commit), Ok(diff)) => (commit.and_then(|out| model::parse_details(&out)), model::parse_diff(&diff)),
+                (Err(e), _) | (_, Err(e)) => return ed.set_status(format!("git failed: {}", e)),
+            };
+            let Some(buf) = ed.buffers.get_mut(id) else { return };
+            let state = buf.local_mut::<DiffBuffer>();
+            let fresh = state.source.as_ref() != Some(&source);
+            if fresh {
+                state.folded.clear();
+            }
+            let title = source.title();
+            (state.source, state.commit, state.files) = (Some(source), commit, files);
+            if show {
+                ed.show_buffer(id);
+                ed.set_status(title);
+            }
+            render(ed, id, fresh || show);
+        });
+    });
+    if let Some(previous) = ed.buffers[id].local_mut::<DiffBuffer>().job.replace(job) {
+        previous.cancel();
+    }
 }
 
-fn diff_args(extra: &[&str]) -> Vec<String> {
-    let mut a = args(&["diff", "--no-ext-diff"]);
-    a.extend(extra.iter().map(|s| s.to_string()));
-    a
+/// Writes the diff buffer's text: from the top if `fresh`, else keeping point on its item.
+fn render(ed: &mut Editor, id: BufferId, fresh: bool) {
+    let faces = *ed.ext_mut::<GitFaces>();
+    let Some(state) = ed.buffers.get(id).and_then(|b| b.local::<DiffBuffer>()) else { return };
+    let Some(source) = &state.source else { return };
+
+    let mut text = RowText::new();
+    match &state.commit {
+        Some(details) => write_commit(&mut text, details, &faces),
+        None => {
+            let files = match state.files.len() {
+                1 => " (1 file)".to_string(),
+                n => format!(" ({} files)", n),
+            };
+            text.line(&[(&source.title(), Some(faces.section)), (&files, None)]);
+        }
+    }
+    text.line(&[]);
+    if state.files.is_empty() {
+        text.line(&[("No changes", Some(FaceId::SHADOW))]);
+    }
+    let mut lines = Vec::new();
+    changes::write(&state.files, &faces, |line| state.is_open(line), |line, parts| {
+        text.row(changes::row_spec(&state.files, line, ()), parts);
+        lines.push(line);
+    });
+
+    ed.buffers[id].local_mut::<DiffBuffer>().lines = lines;
+    if fresh {
+        text.install_fresh(ed, id, "git");
+    } else {
+        text.install(ed, id, "git");
+    }
 }
 
-pub fn unstaged(ed: &mut Editor, root: PathBuf) {
-    show(ed, root, "Unstaged changes".into(), diff_args(&[]));
+/// A commit's summary line, author and date, then the rest of its message.
+fn write_commit(text: &mut RowText, details: &CommitDetails, faces: &GitFaces) {
+    text.line(&faces.commit_line(&details.commit));
+    let author = format!("{} <{}>, {} ({})", details.commit.author, details.email, details.date, details.commit.date);
+    text.line(&[(&author, Some(FaceId::SHADOW))]);
+    if !details.body.is_empty() {
+        text.line(&[]);
+        for line in details.body.lines() {
+            text.line(&[(line, None)]);
+        }
+    }
 }
 
-pub fn staged(ed: &mut Editor, root: PathBuf) {
-    show(ed, root, "Staged changes".into(), diff_args(&["--cached"]));
+/// The active diff buffer's state and the diff line at point.
+fn at_point(ed: &Editor) -> Option<(&DiffBuffer, Line)> {
+    let state = ed.active_buffer().local::<DiffBuffer>()?;
+    Some((state, *state.lines.get(rows::at_point(ed)?)?))
 }
 
-pub fn worktree(ed: &mut Editor, root: PathBuf) {
-    show(ed, root, "Changes since HEAD".into(), diff_args(&["HEAD"]));
+/// TAB: folds or unfolds the file or hunk at point.
+pub fn toggle(ed: &mut Editor) {
+    let Some(fold) = at_point(ed).and_then(|(state, line)| Fold::of(&state.files, line)) else { return };
+    let id = ed.active_buffer_id();
+    let folded = &mut ed.buffers[id].local_mut::<DiffBuffer>().folded;
+    if !folded.remove(&fold) {
+        folded.insert(fold);
+    }
+    render(ed, id, false);
 }
 
-pub fn commit(ed: &mut Editor, root: PathBuf, rev: String) {
-    let what = format!("Commit {}", rev);
-    show(ed, root, what, args(&["show", "--stat", "-p", "--no-ext-diff", &rev]));
+/// RET: visits the working-tree line of the diff line at point.
+pub fn visit(ed: &mut Editor) {
+    let Some((path, line)) = at_point(ed).and_then(|(state, line)| changes::target(&state.files, line)) else {
+        return;
+    };
+    let root = ed.active_buffer().directory();
+    changes::visit(ed, &root, &path, line);
 }
 
-pub fn stash(ed: &mut Editor, root: PathBuf, name: String) {
-    let what = format!("Stash {}", name);
-    show(ed, root, what, args(&["stash", "show", "--stat", "-p", "--no-ext-diff", &name]));
-}
-
-pub fn range(ed: &mut Editor, root: PathBuf, range: String) {
-    let what = format!("Diff {}", range);
-    show(ed, root, what, diff_args(&[&range]));
+/// `s` / `u` / `k`: stages, unstages or discards the file or hunk at point, in a diff of
+/// unstaged or staged changes.
+pub fn act(ed: &mut Editor, action: Action) {
+    let Some((state, line)) = at_point(ed) else {
+        ed.set_status(action.nothing_here());
+        return;
+    };
+    let section = state.source.as_ref().and_then(Source::section);
+    match changes::command(action, section, &state.files, line) {
+        Ok(command) => {
+            let root = ed.active_buffer().directory();
+            changes::run(ed, root, action, command);
+        }
+        Err(why) => ed.set_status(why),
+    }
 }
 
 /// `d d`: the diff of whatever is at point in the status buffer.
 pub fn dwim(ed: &mut Editor, root: PathBuf) {
-    let Some((_, item)) = status::at_point(ed) else {
-        unstaged(ed, root);
-        return;
+    let status = status::at_point(ed).and_then(|(_, item)| {
+        let status = ed.active_buffer().local::<status::StatusBuffer>()?.status.as_ref()?;
+        Some((item, status))
+    });
+    let source = match status {
+        Some((Item::Section(Section::Staged), _)) => Source::Staged,
+        Some((Item::Change(section, line), status)) => match status.files(section).get(line.file()) {
+            Some(file) => Source::File(section, file.path.clone()),
+            None => return,
+        },
+        Some((Item::Stash(i), status)) => Source::Stash(status.stashes[i].name.clone()),
+        Some((Item::Commit(c), status)) => Source::Commit(status.recent[c].hash.clone()),
+        _ => Source::Unstaged,
     };
-    let status = ed.active_buffer().local::<status::StatusBuffer>().and_then(|s| s.status.clone());
-    let Some(status) = status else { return };
-    match item {
-        Item::Section(Section::Staged) => staged(ed, root),
-        Item::File(section @ (Section::Unstaged | Section::Staged), f)
-        | Item::Hunk(section, f, _)
-        | Item::HunkLine(section, f, _, _) => {
-            let Some(path) = status.files(section).get(f).map(|f| f.path.clone()) else { return };
-            let cached: &[&str] = if section == Section::Staged { &["--cached", "--"] } else { &["--"] };
-            let mut extra = cached.to_vec();
-            extra.push(&path);
-            show(ed, root, format!("Changes to {}", path), diff_args(&extra));
-        }
-        Item::Stash(i) => {
-            let name = status.stashes[i].name.clone();
-            stash(ed, root, name);
-        }
-        Item::Commit(c) => {
-            let hash = status.recent[c].hash.clone();
-            commit(ed, root, hash);
-        }
-        _ => unstaged(ed, root),
-    }
+    show(ed, root, source);
 }

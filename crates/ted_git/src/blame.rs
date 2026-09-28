@@ -143,7 +143,7 @@ fn visit(ed: &mut Editor) {
     if hash == UNCOMMITTED {
         ed.set_status("Not committed yet");
     } else {
-        diff::commit(ed, root, hash);
+        diff::show(ed, root, diff::Source::Commit(hash));
     }
 }
 

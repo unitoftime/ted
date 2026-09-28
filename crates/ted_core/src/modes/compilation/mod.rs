@@ -1,5 +1,5 @@
 //! Compilation: runs a build command at the project root, streaming its output into a
-//! read-only `*compilation*` buffer. Errors and warnings are highlighted and form the
+//! read-only `compilation` buffer. Errors and warnings are highlighted and form the
 //! buffer's location list (see `locations`): RET visits one, `n` / `p` move between them
 //! and `next-error` steps through them from any buffer. `g` reruns the command, `C-c C-k`
 //! kills it, and starting a build while one runs replaces it.
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Instant;
 
-use crate::buffer::{Buffer, BufferId, Decoration};
+use crate::buffer::{Buffer, BufferId, Decoration, StyledText};
 use crate::editor::Editor;
 use crate::face::FaceId;
 use crate::jobs::{JobContext, JobHandle};
@@ -26,7 +26,8 @@ use crate::text::collapse_tilde;
 use parse::{Batch, OutputParser};
 use process::Process;
 
-pub const BUFFER_NAME: &str = "*compilation*";
+pub const BUFFER_NAME: &str = "compilation";
+pub const MODE: &str = "Compilation";
 const DECORATIONS: &str = "compilation";
 
 #[derive(Default)]
@@ -75,7 +76,7 @@ pub fn register(ed: &mut Editor) {
         };
         match stop(ed, id) {
             Some(run) => {
-                let text = format!("Compilation killed after {:.2}s", run.started.elapsed().as_secs_f64());
+                let text = format!("Compilation stopped after {:.2}s", run.started.elapsed().as_secs_f64());
                 append(ed, id, Batch::footer(&text, Some(FaceId::ERROR)));
                 ed.set_status(text);
             }
@@ -83,12 +84,12 @@ pub fn register(ed: &mut Editor) {
         }
     });
 
-    ed.define_mode(locations::list_mode("Compilation").revert("recompile"));
+    ed.define_mode(locations::list_mode(MODE).revert("recompile"));
     ed.bind_all("compilation", &[("C-c C-k", "kill-compilation")]);
 }
 
 fn is_compilation(buf: &Buffer) -> bool {
-    buf.name() == BUFFER_NAME && buf.path().is_none()
+    buf.path().is_none() && buf.mode().name == MODE
 }
 
 /// The last build's command and directory, else the configured command at the project root.
@@ -102,15 +103,14 @@ fn last_run(ed: &Editor, default_command: Setting<String>) -> (String, PathBuf) 
 
 /// Starts `command` in `dir`, replacing any running build and the previous output.
 fn run(ed: &mut Editor, command: String, dir: PathBuf) {
-    let id = ed.special_buffer(BUFFER_NAME, "Compilation");
+    let id = ed.special_buffer(BUFFER_NAME, MODE);
     stop(ed, id);
 
+    let mut header = StyledText::new();
+    header.line(&[(&collapse_tilde(&dir), Some(FaceId::HEADING)), ("  $ ", Some(FaceId::SHADOW)), (&command, None)]);
+    header.line(&[]);
     let buf = &mut ed.buffers[id];
-    buf.set_text(&format!(
-        "-*- mode: compilation; default-directory: \"{}/\" -*-\n{}\n\n",
-        collapse_tilde(&dir),
-        command
-    ));
+    buf.set_styled(DECORATIONS, header);
     buf.set_directory(&dir);
     locations::clear(buf);
     let end = buf.len_chars();
@@ -208,14 +208,14 @@ fn finish(ed: &mut Editor, id: BufferId, status: io::Result<ExitStatus>) {
     let Some(run) = ed.buffers.get_mut(id).and_then(|buf| buf.local_mut::<Compilation>().run.take()) else {
         return;
     };
-    let elapsed = format!("after {:.2}s", run.started.elapsed().as_secs_f64());
+    let secs = run.started.elapsed().as_secs_f64();
     let (text, face) = match status {
-        Ok(s) if s.success() => (format!("Compilation finished {}", elapsed), None),
+        Ok(s) if s.success() => (format!("Compilation finished in {:.2}s", secs), None),
         Ok(s) => match s.code() {
             Some(code) => {
-                (format!("Compilation exited abnormally with code {} {}", code, elapsed), Some(FaceId::ERROR))
+                (format!("Compilation failed with exit code {} after {:.2}s", code, secs), Some(FaceId::ERROR))
             }
-            None => (format!("Compilation terminated by a signal {}", elapsed), Some(FaceId::ERROR)),
+            None => (format!("Compilation terminated by a signal after {:.2}s", secs), Some(FaceId::ERROR)),
         },
         Err(e) => (format!("Compilation failed: {}", e), Some(FaceId::ERROR)),
     };

@@ -27,7 +27,7 @@ use crate::frame::Color;
 use crate::mode::Mode;
 use crate::rows::{self, RowSpec, RowText};
 use crate::settings::Setting;
-use crate::text::collapse_tilde;
+use crate::text::{collapse_tilde, natural_cmp};
 
 use details::{Cells, Details, Formatter};
 
@@ -88,7 +88,7 @@ pub fn register(ed: &mut Editor) {
         details: ed.settings.define(
             "dired.details",
             true,
-            "Show permissions, owner, size and date in listings (`(` toggles)",
+            "Show sizes and dates (and unusual permissions and owners) in listings (`(` toggles)",
         ),
         details_limit: ed.settings.define(
             "dired.details_limit",
@@ -141,7 +141,7 @@ pub fn register(ed: &mut Editor) {
             }
         });
     });
-    c.register("dired-toggle-details", "Show or hide permissions, owner, size and date", |ed, _| {
+    c.register("dired-toggle-details", "Show or hide sizes, dates, permissions and owners", |ed, _| {
         relist(ed, |state| {
             state.details = if state.detailed { DetailView::Hidden } else { DetailView::Shown };
             if state.detailed {
@@ -273,7 +273,7 @@ fn refresh_all(ed: &mut Editor) {
 /// Reads `dir` as dired buffer `id` (if any) lists it: with or without dotfiles, and with
 /// details unless they are hidden or the directory is over the limit. A `(` that forced
 /// details applies only to the directory it was pressed in. Directories come first, then
-/// files, each sorted by name.
+/// files, each in natural order (`natural_cmp`).
 fn read(ed: &Editor, id: Option<BufferId>, dir: &Path) -> io::Result<Dired> {
     let config = config(ed);
     let state = id.and_then(|id| Some((ed.buffers[id].local::<Dired>()?, ed.buffers[id].path())));
@@ -306,7 +306,9 @@ fn read(ed: &Editor, id: Option<BufferId>, dir: &Path) -> io::Result<Dired> {
             Some(Entry { name: e.file_name(), is_dir, is_link, details })
         })
         .collect();
-    entries.sort_unstable_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    entries.sort_unstable_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| natural_cmp(a.name.as_encoded_bytes(), b.name.as_encoded_bytes()))
+    });
     Ok(Dired { entries, show_hidden, details, detailed, start: None })
 }
 
@@ -366,50 +368,49 @@ fn render(dir: &Path, state: &Dired, config: Config) -> RowText {
     text
 }
 
-/// The details columns of a listing, sized to its widest values; none when no entry has
-/// details.
+/// The details columns of a listing, each as wide as its widest cell; a column no entry
+/// fills (or a listing without details) takes no space.
 struct Columns {
     cells: Vec<Cells>,
-    widths: [usize; 3],
+    widths: [usize; 4],
     /// Chars before each name.
     name_col: usize,
 }
 
 impl Columns {
     const INDENT: &str = "  ";
-    const PERMISSIONS: usize = 10;
-    const DATE: usize = 12;
+    const GAP: &str = "  ";
 
     fn new(entries: &[Entry]) -> Self {
-        if entries.iter().all(|e| e.details.is_none()) {
-            return Self { cells: Vec::new(), widths: [0; 3], name_col: Self::INDENT.len() };
-        }
         let mut formatter = Formatter::new();
-        let cells: Vec<Cells> = entries
-            .iter()
-            .map(|e| e.details.as_ref().map_or_else(Cells::default, |d| formatter.cells(d, e.is_dir)))
-            .collect();
-        let width = |cell: fn(&Cells) -> &str| cells.iter().map(|c| cell(c).chars().count()).max().unwrap_or(0);
-        let widths = [width(|c| &c.owner), width(|c| &c.group), width(|c| &c.size)];
-        let name_col = Self::INDENT.len() + Self::PERMISSIONS + Self::DATE + widths.iter().sum::<usize>() + 5 * 2;
+        let cells: Vec<Cells> = match entries.iter().any(|e| e.details.is_some()) {
+            true => entries
+                .iter()
+                .map(|e| e.details.as_ref().map_or_else(Cells::default, |d| formatter.cells(d, e.is_dir)))
+                .collect(),
+            false => Vec::new(),
+        };
+        let mut widths = [0; 4];
+        for c in &cells {
+            for (width, (cell, _)) in widths.iter_mut().zip(c.columns()) {
+                *width = (*width).max(cell.chars().count());
+            }
+        }
+        let name_col = Self::INDENT.len() + widths.iter().filter(|&&w| w > 0).map(|w| w + Self::GAP.len()).sum::<usize>();
         Self { cells, widths, name_col }
     }
 
     /// Everything before entry `i`'s name.
     fn line(&self, i: usize) -> String {
-        let Some(c) = self.cells.get(i) else { return Self::INDENT.to_string() };
-        let [owner, group, size] = self.widths;
-        format!(
-            "{}{:<pw$}  {:<owner$}  {:<group$}  {:>size$}  {:<dw$}  ",
-            Self::INDENT,
-            c.permissions,
-            c.owner,
-            c.group,
-            c.size,
-            c.modified,
-            pw = Self::PERMISSIONS,
-            dw = Self::DATE,
-        )
+        let mut line = String::with_capacity(self.name_col);
+        line.push_str(Self::INDENT);
+        let Some(c) = self.cells.get(i) else { return line };
+        for (&width, (cell, right)) in self.widths.iter().zip(c.columns()).filter(|(&w, _)| w > 0) {
+            let pad = " ".repeat(width - cell.chars().count());
+            let (before, after) = if right { (pad.as_str(), "") } else { ("", pad.as_str()) };
+            line.extend([before, cell, after, Self::GAP]);
+        }
+        line
     }
 }
 

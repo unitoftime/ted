@@ -1,5 +1,6 @@
 //! Small text primitives shared by buffers and single-line inputs.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::ops::Range;
@@ -192,4 +193,34 @@ pub fn highlight_runs<'a>(text: &'a str, highlights: &[Range<usize>]) -> Vec<(&'
     }
     runs.push((at..len, false));
     runs.into_iter().filter(|(r, _)| !r.is_empty()).map(|(r, hl)| (&text[bounds[r.start]..bounds[r.end]], hl)).collect()
+}
+
+/// Orders names as people read them: ignoring ASCII case, with runs of digits compared as
+/// numbers (`file2` before `file10`). Names equal that way fall back to their bytes.
+pub fn natural_cmp(a: &[u8], b: &[u8]) -> Ordering {
+    fn digits(s: &[u8]) -> usize {
+        s.iter().take_while(|c| c.is_ascii_digit()).count()
+    }
+    fn number(s: &[u8]) -> &[u8] {
+        &s[s.iter().take_while(|&&c| c == b'0').count()..]
+    }
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        let order = if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let (m, n) = (digits(&a[i..]), digits(&b[j..]));
+            let (x, y) = (number(&a[i..i + m]), number(&b[j..j + n]));
+            i += m;
+            j += n;
+            x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+        } else {
+            let order = a[i].to_ascii_lowercase().cmp(&b[j].to_ascii_lowercase());
+            i += 1;
+            j += 1;
+            order
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    (a.len() - i).cmp(&(b.len() - j)).then_with(|| a.cmp(b))
 }

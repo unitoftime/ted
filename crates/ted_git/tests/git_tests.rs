@@ -111,7 +111,7 @@ fn status_stage_unstage_commit_and_discard() {
     ed.handle_key(KeyEvent::ctrl('c'));
     ed.handle_key(KeyEvent::ctrl('c'));
     wait_until(&mut ed, "commit", |ed| text(ed).contains("Head:     main  Capitalize two"));
-    assert!(ed.active_buffer().name().starts_with("git: "), "returns to the status buffer");
+    assert!(ed.active_buffer().name().starts_with("git status: "), "returns to the status buffer");
     assert_eq!(sh_git(&repo, &["log", "-1", "--format=%s"]).trim(), "Capitalize two");
     assert!(!text(&ed).contains("Staged changes"));
 
@@ -137,7 +137,7 @@ fn diff_menu_and_help_popup() {
     key(&mut ed, 'd');
     key(&mut ed, 'u');
     wait_until(&mut ed, "unstaged diff", |ed| text(ed).contains("+TWO"));
-    assert!(ed.active_buffer().name().starts_with("git-diff: "));
+    assert!(ed.active_buffer().name().starts_with("git diff: "));
     goto_line(&mut ed, "+TWO");
     ed.handle_key(KeyEvent::plain(KeyCode::Enter));
     assert_eq!(ed.active_buffer().name(), "a.txt");
@@ -148,7 +148,7 @@ fn diff_menu_and_help_popup() {
     wait_until(&mut ed, "status", |ed| text(ed).contains("Unstaged changes (1)"));
     key(&mut ed, 'd');
     key(&mut ed, 's');
-    wait_until(&mut ed, "staged diff", |ed| text(ed) == "No changes.\n");
+    wait_until(&mut ed, "staged diff", |ed| text(ed).contains("No changes"));
 
     // h lists commands from the keymap, and its keys run them
     key(&mut ed, 'h');

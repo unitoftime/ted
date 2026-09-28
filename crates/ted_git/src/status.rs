@@ -1,6 +1,6 @@
-//! The status buffer: renders `Status` as sections with inline diffs, each line of which is
-//! a row (`ted_core::rows`) for the item it shows, and implements the actions that operate
-//! "at point".
+//! The status buffer: renders `Status` as sections with inline diffs (`changes`), each
+//! line of which is a row (`ted_core::rows`) for the item it shows, and implements the
+//! actions that operate "at point".
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,10 +9,11 @@ use ted_core::jobs::JobHandle;
 use ted_core::rows::{self, RowSpec, RowText};
 use ted_core::{BufferId, Editor, FaceId};
 
+use crate::changes::{self, Action, Command, Fold, Line};
+use crate::diff::{self, Source};
 use crate::git::args;
 use crate::model::{self, Section, Status};
-use crate::process;
-use crate::{repo_name, GitFaces};
+use crate::{generated_buffer, GitFaces};
 
 pub const MODE: &str = "Git Status";
 
@@ -22,27 +23,19 @@ pub enum Item {
     /// A line that stands for nothing: the head, blanks between sections.
     Blank,
     Section(Section),
-    File(Section, usize),
-    Hunk(Section, usize, usize),
-    /// A line inside a hunk: (section, file, hunk, line within the hunk).
-    HunkLine(Section, usize, usize, usize),
+    Untracked(usize),
+    /// A line of the unstaged or staged diff.
+    Change(Section, Line),
     Stash(usize),
     Commit(usize),
 }
 
-impl Item {
-    /// Whether `n` / `p` stop here.
-    fn is_heading(self) -> bool {
-        matches!(self, Item::Section(_) | Item::File(..) | Item::Hunk(..) | Item::Stash(_) | Item::Commit(_))
-    }
-}
-
-/// Identifies an item across refreshes, so point stays on "the same thing".
+/// Identifies an item across refreshes, so point and folds stay on "the same thing".
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ItemKey {
     Section(Section),
-    File(Section, String),
-    Hunk(Section, String, String),
+    Untracked(String),
+    Change(Section, Fold),
     Stash(String),
     Commit(String),
 }
@@ -53,45 +46,40 @@ pub struct StatusBuffer {
     pub status: Option<Status>,
     /// The item of each row.
     items: Vec<Item>,
-    expanded: HashSet<ItemKey>,
-    collapsed: HashSet<ItemKey>,
+    /// Sections and folds `TAB` turned from how they start: sections and hunks open,
+    /// files closed.
+    toggled: HashSet<ItemKey>,
     refresh_job: Option<JobHandle>,
 }
 
 impl StatusBuffer {
     fn key(&self, item: Item) -> Option<ItemKey> {
         let status = self.status.as_ref()?;
-        let path = |section: Section, file: usize| match section {
-            Section::Untracked => status.untracked.get(file).cloned(),
-            _ => status.files(section).get(file).map(|f| f.path.clone()),
-        };
         Some(match item {
             Item::Section(s) => ItemKey::Section(s),
-            Item::File(s, f) => ItemKey::File(s, path(s, f)?),
-            Item::Hunk(s, f, h) | Item::HunkLine(s, f, h, _) => {
-                ItemKey::Hunk(s, path(s, f)?, status.files(s).get(f)?.hunks.get(h)?.header.clone())
-            }
+            Item::Untracked(i) => ItemKey::Untracked(status.untracked.get(i)?.clone()),
+            Item::Change(s, line) => ItemKey::Change(s, Fold::of(status.files(s), line)?),
             Item::Stash(i) => ItemKey::Stash(status.stashes.get(i)?.name.clone()),
             Item::Commit(c) => ItemKey::Commit(status.recent.get(c)?.hash.clone()),
             Item::Blank => return None,
         })
     }
 
+    /// Whether what is under `item` shows.
+    fn is_open(&self, item: Item) -> bool {
+        let starts_open = !matches!(item, Item::Change(_, Line::File(_)));
+        self.key(item).is_none_or(|key| starts_open != self.toggled.contains(&key))
+    }
+
     /// The row showing `item`, keyed by what it shows so point stays on it across
     /// refreshes; `n` / `p` stop on headings only.
     fn row(&self, item: Item) -> RowSpec {
-        let hunk_line = match item {
-            Item::HunkLine(.., l) => Some(l),
-            _ => None,
-        };
-        let spec = match self.key(item) {
-            Some(key) => RowSpec::new((key, hunk_line)),
-            None => RowSpec::new(item),
-        };
-        if item.is_heading() {
-            spec
-        } else {
-            spec.passive()
+        match item {
+            Item::Change(section, line) => {
+                let files = self.status.as_ref().map_or(&[][..], |s| s.files(section));
+                changes::row_spec(files, line, section)
+            }
+            _ => RowSpec::new(self.key(item).ok_or(item)),
         }
     }
 }
@@ -102,17 +90,12 @@ pub fn find_buffer(ed: &Editor, root: &Path) -> Option<BufferId> {
 
 /// Opens (or reuses) the status buffer for `root` in the active window and refreshes it.
 pub fn open(ed: &mut Editor, root: PathBuf) {
-    let id = match find_buffer(ed, &root) {
-        Some(id) => id,
-        None => {
-            let id = ed.new_buffer(format!("git: {}", repo_name(&root)), MODE);
-            let buf = &mut ed.buffers[id];
-            buf.set_text("Loading...\n");
-            buf.local_mut::<StatusBuffer>();
-            buf.set_directory(&root);
-            id
-        }
-    };
+    let id = generated_buffer(ed, "git status", MODE, &root);
+    let buf = &mut ed.buffers[id];
+    if buf.local::<StatusBuffer>().is_none() {
+        buf.set_text("Loading...\n");
+        buf.local_mut::<StatusBuffer>();
+    }
     ed.show_buffer(id);
     refresh(ed, &root);
 }
@@ -156,6 +139,15 @@ impl Renderer<'_> {
         self.text.row(self.state.row(item), parts);
         self.items.push(item);
     }
+
+    /// A section's heading, then (unless it is collapsed) what `rows` writes under it.
+    fn section(&mut self, section: Section, title: &str, faces: &GitFaces, rows: impl FnOnce(&mut Self)) {
+        self.line(&[]);
+        self.item(Item::Section(section), &[(title, Some(faces.section))]);
+        if self.state.is_open(Item::Section(section)) {
+            rows(self);
+        }
+    }
 }
 
 fn render(ed: &mut Editor, id: BufferId) {
@@ -175,63 +167,39 @@ fn render(ed: &mut Editor, id: BufferId) {
         r.line(&[("Upstream: ", None), (upstream, Some(faces.branch_remote)), (&counts, None)]);
     }
 
-    let is_collapsed = |key: ItemKey| state.collapsed.contains(&key);
     if !status.untracked.is_empty() {
-        r.line(&[]);
         let title = format!("Untracked files ({})", status.untracked.len());
-        r.item(Item::Section(Section::Untracked), &[(&title, Some(faces.section))]);
-        if !is_collapsed(ItemKey::Section(Section::Untracked)) {
+        r.section(Section::Untracked, &title, &faces, |r| {
             for (i, path) in status.untracked.iter().enumerate() {
-                r.item(Item::File(Section::Untracked, i), &[("  ", None), (path, None)]);
+                r.item(Item::Untracked(i), &[("  ", None), (path, None)]);
             }
-        }
+        });
     }
     for (section, title) in [(Section::Unstaged, "Unstaged changes"), (Section::Staged, "Staged changes")] {
         let files = status.files(section);
         if files.is_empty() {
             continue;
         }
-        r.line(&[]);
         let title = format!("{} ({})", title, files.len());
-        r.item(Item::Section(section), &[(&title, Some(faces.section))]);
-        if is_collapsed(ItemKey::Section(section)) {
-            continue;
-        }
-        for (f, file) in files.iter().enumerate() {
-            let kind = format!("{:<11}", file.kind);
-            r.item(Item::File(section, f), &[(&kind, None), (&file.path, Some(faces.file_heading))]);
-            if !state.expanded.contains(&ItemKey::File(section, file.path.clone())) {
-                continue;
-            }
-            for (h, hunk) in file.hunks.iter().enumerate() {
-                r.item(Item::Hunk(section, f, h), &[(&hunk.header, Some(faces.hunk_heading))]);
-                if is_collapsed(ItemKey::Hunk(section, file.path.clone(), hunk.header.clone())) {
-                    continue;
-                }
-                for (l, line) in hunk.lines.iter().enumerate() {
-                    r.item(Item::HunkLine(section, f, h, l), &[(line, faces.diff_line(line))]);
-                }
-            }
-        }
+        r.section(section, &title, &faces, |r| {
+            let open = |line| state.is_open(Item::Change(section, line));
+            changes::write(files, &faces, open, |line, parts| r.item(Item::Change(section, line), parts));
+        });
     }
     if !status.stashes.is_empty() {
-        r.line(&[]);
         let title = format!("Stashes ({})", status.stashes.len());
-        r.item(Item::Section(Section::Stashes), &[(&title, Some(faces.section))]);
-        if !is_collapsed(ItemKey::Section(Section::Stashes)) {
+        r.section(Section::Stashes, &title, &faces, |r| {
             for (i, stash) in status.stashes.iter().enumerate() {
                 r.item(Item::Stash(i), &[(&stash.name, Some(faces.hash)), (" ", None), (&stash.subject, None)]);
             }
-        }
+        });
     }
     if !status.recent.is_empty() {
-        r.line(&[]);
-        r.item(Item::Section(Section::Recent), &[("Recent commits", Some(faces.section))]);
-        if !is_collapsed(ItemKey::Section(Section::Recent)) {
+        r.section(Section::Recent, "Recent commits", &faces, |r| {
             for (i, commit) in status.recent.iter().enumerate() {
                 r.item(Item::Commit(i), &faces.commit_line(commit));
             }
-        }
+        });
     }
 
     let Renderer { text, items, .. } = r;
@@ -254,158 +222,88 @@ fn status_of(ed: &Editor) -> Option<&Status> {
 /// TAB: expands or collapses the section, file or hunk at point.
 pub fn toggle(ed: &mut Editor) {
     let Some((_, item)) = at_point(ed) else { return };
+    if !matches!(item, Item::Section(_) | Item::Change(..)) {
+        return;
+    }
     let id = ed.active_buffer_id();
     let state = ed.buffers[id].local_mut::<StatusBuffer>();
     let Some(key) = state.key(item) else { return };
-    let set = match key {
-        ItemKey::File(..) => &mut state.expanded,
-        _ => &mut state.collapsed,
-    };
-    if !set.remove(&key) {
-        set.insert(key);
+    if !state.toggled.remove(&key) {
+        state.toggled.insert(key);
     }
     render(ed, id);
 }
 
-/// RET: visits the file (at the diff line's position) or shows the commit at point.
+/// RET: visits the file (at the diff line's position) or shows the stash or commit at
+/// point.
 pub fn visit(ed: &mut Editor) {
     let Some((root, item)) = at_point(ed) else { return };
     let Some(status) = status_of(ed) else { return };
-    let (path, line) = match item {
-        Item::File(Section::Untracked, i) => (status.untracked.get(i).cloned(), 0),
-        Item::File(s, f) => (status.files(s).get(f).map(|f| f.path.clone()), 0),
-        Item::Hunk(s, f, h) | Item::HunkLine(s, f, h, _) => {
-            let Some(file) = status.files(s).get(f) else { return };
-            let hunk = &file.hunks[h];
-            let offset = match item {
-                // Removed lines don't exist in the new file; count only lines that do.
-                Item::HunkLine(_, _, _, l) => hunk.lines[..l].iter().filter(|x| !x.starts_with('-')).count(),
-                _ => 0,
-            };
-            (Some(file.path.clone()), hunk.new_start().saturating_sub(1) + offset)
-        }
-        Item::Stash(i) => {
-            let name = status.stashes[i].name.clone();
-            crate::diff::stash(ed, root, name);
-            return;
-        }
-        Item::Commit(c) => {
-            let hash = status.recent[c].hash.clone();
-            crate::diff::commit(ed, root, hash);
-            return;
-        }
-        _ => return,
+    let target = match item {
+        Item::Untracked(i) => status.untracked.get(i).map(|path| (path.clone(), 0)),
+        Item::Change(section, line) => changes::target(status.files(section), line),
+        Item::Stash(i) => return diff::show(ed, root, Source::Stash(status.stashes[i].name.clone())),
+        Item::Commit(c) => return diff::show(ed, root, Source::Commit(status.recent[c].hash.clone())),
+        _ => None,
     };
-    let Some(path) = path else { return };
-    if let Err(e) = ed.open_file(root.join(&path)) {
-        ed.set_status(format!("Cannot open {}: {}", path, e));
-        return;
+    if let Some((path, line)) = target {
+        changes::visit(ed, &root, &path, line);
     }
-    let mut doc = ed.doc();
-    let pos = doc.buf.line_to_char(line);
-    doc.set_cursor(pos);
 }
 
-/// `s`: stages the section, file or hunk at point.
-pub fn stage(ed: &mut Editor) {
+/// `s` / `u` / `k`: stages, unstages or discards the section, file or hunk at point.
+/// Discarding a stash drops it.
+pub fn act(ed: &mut Editor, action: Action) {
     let Some((root, item)) = at_point(ed) else { return };
     let Some(status) = status_of(ed) else { return };
-    let (git_args, stdin) = match item {
-        Item::Section(Section::Untracked) => {
+    let command = match (action, item) {
+        (Action::Stage, Item::Section(Section::Untracked)) => {
             let mut a = args(&["add", "--"]);
             a.extend(status.untracked.iter().cloned());
-            (a, None)
+            Ok(Command::new(a, "all untracked files"))
         }
-        Item::Section(Section::Unstaged) => (args(&["add", "-u"]), None),
-        Item::File(Section::Untracked, i) => (args(&["add", "--", &status.untracked[i]]), None),
-        Item::File(Section::Unstaged, f) => (args(&["add", "--", &status.unstaged[f].path]), None),
-        Item::Hunk(Section::Unstaged, f, h) | Item::HunkLine(Section::Unstaged, f, h, _) => {
-            (args(&["apply", "--cached", "-"]), Some(status.unstaged[f].patch(Some(h))))
+        (Action::Stage, Item::Untracked(i)) => Ok(Command::new(args(&["add", "--", &status.untracked[i]]), "")),
+        (Action::Stage, Item::Section(Section::Unstaged)) => Ok(Command::new(args(&["add", "-u"]), "")),
+        (Action::Unstage, Item::Section(Section::Staged)) => Ok(Command::new(args(&["reset", "-q"]), "")),
+        (Action::Discard, Item::Section(Section::Unstaged)) => {
+            Ok(Command::new(args(&["checkout", "--", "."]), "all unstaged changes"))
         }
-        _ => {
-            ed.set_status("Nothing to stage here");
-            return;
+        (Action::Discard, Item::Section(Section::Untracked)) => {
+            let paths = status.untracked.clone();
+            return delete_untracked(ed, root, "all untracked files".into(), paths);
         }
-    };
-    process::run(ed, root, git_args, stdin, "Staged", |_| {});
-}
-
-/// `u`: unstages the section, file or hunk at point.
-pub fn unstage(ed: &mut Editor) {
-    let Some((root, item)) = at_point(ed) else { return };
-    let Some(status) = status_of(ed) else { return };
-    let (git_args, stdin) = match item {
-        Item::Section(Section::Staged) => (args(&["reset", "-q"]), None),
-        Item::File(Section::Staged, f) => (args(&["reset", "-q", "--", &status.staged[f].path]), None),
-        Item::Hunk(Section::Staged, f, h) | Item::HunkLine(Section::Staged, f, h, _) => {
-            (args(&["apply", "--cached", "--reverse", "-"]), Some(status.staged[f].patch(Some(h))))
-        }
-        _ => {
-            ed.set_status("Nothing to unstage here");
-            return;
-        }
-    };
-    process::run(ed, root, git_args, stdin, "Unstaged", |_| {});
-}
-
-/// `k`: discards the untracked file or unstaged change at point, after confirmation.
-pub fn discard(ed: &mut Editor) {
-    let Some((root, item)) = at_point(ed) else { return };
-    let Some(status) = status_of(ed) else { return };
-    let (what, git_args, stdin, delete): (String, Vec<String>, Option<String>, Vec<String>) = match item {
-        Item::Section(Section::Untracked) => ("all untracked files".into(), Vec::new(), None, status.untracked.clone()),
-        Item::File(Section::Untracked, i) => {
+        (Action::Discard, Item::Untracked(i)) => {
             let path = status.untracked[i].clone();
             let what = if path.ends_with('/') { format!("{} and everything in it", path) } else { path.clone() };
-            (what, Vec::new(), None, vec![path])
+            return delete_untracked(ed, root, what, vec![path]);
         }
-        Item::Section(Section::Unstaged) => {
-            ("all unstaged changes".into(), args(&["checkout", "--", "."]), None, Vec::new())
+        (Action::Discard, Item::Stash(i)) => {
+            return crate::menus::drop_stash(ed, root, status.stashes[i].name.clone());
         }
-        Item::File(Section::Unstaged, f) => {
-            let path = status.unstaged[f].path.clone();
-            (format!("changes to {}", path), args(&["checkout", "--", &path]), None, Vec::new())
-        }
-        Item::Hunk(Section::Unstaged, f, h) | Item::HunkLine(Section::Unstaged, f, h, _) => (
-            "this hunk".into(),
-            args(&["apply", "--reverse", "-"]),
-            Some(status.unstaged[f].patch(Some(h))),
-            Vec::new(),
-        ),
-        Item::File(Section::Staged, _) | Item::Hunk(Section::Staged, ..) | Item::HunkLine(Section::Staged, ..) => {
-            ed.set_status("Unstage it first (u), then discard");
-            return;
-        }
-        Item::Stash(i) => {
-            crate::menus::drop_stash(ed, root, status.stashes[i].name.clone());
-            return;
-        }
-        _ => {
-            ed.set_status("Nothing to discard here");
-            return;
-        }
+        (_, Item::Change(section, line)) => changes::command(action, Some(section), status.files(section), line),
+        _ => Err(action.nothing_here()),
     };
+    match command {
+        Ok(command) => changes::run(ed, root, action, command),
+        Err(why) => ed.set_status(why),
+    }
+}
+
+/// Deletes untracked `paths` (a directory listed as `dir/` with everything in it) after
+/// confirmation.
+fn delete_untracked(ed: &mut Editor, root: PathBuf, what: String, paths: Vec<String>) {
     ed.confirm("git-discard", format!("Discard {}? (y/n) ", what), move |ed, yes| {
         if !yes {
             ed.set_status("Discard cancelled");
             return;
         }
-        if !delete.is_empty() {
-            let failed: Vec<_> = delete.iter().filter(|p| delete_untracked(&root.join(p)).is_err()).collect();
-            ed.set_status(if failed.is_empty() {
-                "Deleted".to_string()
-            } else {
-                format!("Could not delete {:?}", failed)
-            });
-            refresh(ed, &root);
-        } else {
-            process::run(ed, root, git_args, stdin, "Discarded", |_| {});
-        }
+        let failed: Vec<_> = paths.iter().filter(|p| delete(&root.join(p)).is_err()).collect();
+        ed.set_status(if failed.is_empty() { "Deleted".to_string() } else { format!("Could not delete {:?}", failed) });
+        refresh(ed, &root);
     });
 }
 
-/// Deletes an untracked file, or a whole untracked directory (listed as `dir/`).
-fn delete_untracked(path: &Path) -> std::io::Result<()> {
+fn delete(path: &Path) -> std::io::Result<()> {
     if path.is_dir() {
         std::fs::remove_dir_all(path)
     } else {

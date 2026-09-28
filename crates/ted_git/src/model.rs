@@ -74,24 +74,50 @@ pub struct Ref {
     pub kind: RefKind,
 }
 
+/// The `--format` fields `parse_commit` reads.
+const COMMIT_FORMAT: &str = "%h%x00%D%x00%s%x00%an%x00%ar";
+
 /// `git log` arguments for the latest `count` commits, in the form `parse_log` reads.
 pub fn log_args(count: usize) -> Vec<String> {
-    let format = "--format=%h%x00%D%x00%s%x00%an%x00%ar";
-    vec!["log".into(), "--decorate=full".into(), format.into(), "-n".into(), count.to_string()]
+    let format = format!("--format={}", COMMIT_FORMAT);
+    vec!["log".into(), "--decorate=full".into(), format, "-n".into(), count.to_string()]
 }
 
 /// Commits from `git log` run with `log_args`.
 pub fn parse_log(output: &str) -> Vec<Commit> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split('\0');
-            let mut next = || fields.next().map(str::to_string);
-            let hash = next()?;
-            let refs = parse_refs(&next()?);
-            Some(Commit { hash, refs, subject: next()?, author: next()?, date: next()? })
-        })
-        .collect()
+    output.lines().filter_map(|line| parse_commit(&mut line.split('\0'))).collect()
+}
+
+/// A commit from the `COMMIT_FORMAT` fields.
+fn parse_commit<'a>(fields: &mut impl Iterator<Item = &'a str>) -> Option<Commit> {
+    let mut next = || fields.next().map(str::to_string);
+    let hash = next()?;
+    let refs = parse_refs(&next()?);
+    Some(Commit { hash, refs, subject: next()?, author: next()?, date: next()? })
+}
+
+/// A commit as the header of its diff shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitDetails {
+    pub commit: Commit,
+    pub email: String,
+    /// The author date, `yyyy-mm-dd hh:mm`.
+    pub date: String,
+    /// The message after the subject.
+    pub body: String,
+}
+
+/// `git show` arguments for `rev`'s details, in the form `parse_details` reads.
+pub fn details_args(rev: &str) -> Vec<String> {
+    let format = format!("--format={}%x00%ae%x00%ad%x00%b", COMMIT_FORMAT);
+    args(&["show", "--no-patch", "--decorate=full", "--date=format:%Y-%m-%d %H:%M", &format, rev])
+}
+
+pub fn parse_details(output: &str) -> Option<CommitDetails> {
+    let mut fields = output.splitn(8, '\0');
+    let commit = parse_commit(&mut fields)?;
+    let (email, date) = (fields.next()?.to_string(), fields.next()?.to_string());
+    Some(CommitDetails { commit, email, date, body: fields.next()?.trim_end().to_string() })
 }
 
 /// Refs from a full `%D` decoration: `HEAD -> refs/heads/main, refs/remotes/origin/main,
@@ -146,6 +172,9 @@ pub struct FileDiff {
     /// Lines from `diff --git` up to the first hunk; needed to rebuild patches.
     pub header: Vec<String>,
     pub hunks: Vec<Hunk>,
+    /// Lines added and removed across the hunks.
+    pub added: usize,
+    pub removed: usize,
 }
 
 impl FileDiff {
@@ -243,13 +272,19 @@ pub fn parse_diff(output: &str) -> Vec<FileDiff> {
         let line = raw.strip_suffix('\n').unwrap_or(raw);
         if line.starts_with("diff --git ") || line.starts_with("diff --cc ") {
             let kind = if line.starts_with("diff --cc ") { "unmerged" } else { "modified" };
-            files.push(FileDiff { path: String::new(), kind, header: vec![line.to_string()], hunks: Vec::new() });
+            let header = vec![line.to_string()];
+            files.push(FileDiff { path: String::new(), kind, header, hunks: Vec::new(), added: 0, removed: 0 });
             continue;
         }
         let Some(file) = files.last_mut() else { continue };
         if line.starts_with("@@") {
             file.hunks.push(Hunk { header: line.to_string(), lines: Vec::new() });
         } else if let Some(hunk) = file.hunks.last_mut() {
+            match line.as_bytes().first() {
+                Some(b'+') => file.added += 1,
+                Some(b'-') => file.removed += 1,
+                _ => {}
+            }
             hunk.lines.push(line.to_string());
         } else {
             file.header.push(line.to_string());

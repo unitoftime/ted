@@ -42,11 +42,15 @@ impl Editor {
         self.add_buffer(buf)
     }
 
-    /// The generated (file-less) buffer called `name`, created empty in `mode` if needed:
-    /// how output buffers like `*compilation*` or `*xref*` are found again.
+    /// The generated (file-less) buffer in `mode`, created empty if needed, named `name`:
+    /// how output buffers like the build output or help are found again. They are found
+    /// by mode, so a name is only what the buffer shows (`xref: foo` names its query).
     pub fn special_buffer(&mut self, name: &str, mode: &str) -> BufferId {
-        match self.buffers.find(|b| b.name() == name && b.path().is_none()) {
-            Some(id) => id,
+        match self.buffers.find(|b| b.path().is_none() && b.mode().name == mode) {
+            Some(id) => {
+                self.buffers[id].set_name(name);
+                id
+            }
             None => self.new_buffer(name, mode),
         }
     }
@@ -248,13 +252,14 @@ impl Editor {
         }
     }
 
-    /// A short description of a buffer for pickers: its path, or its kind.
+    /// A short description of a buffer for pickers: its path, else the directory it works
+    /// in (its name already says what it is).
     pub fn buffer_description(&self, id: BufferId) -> String {
         let buf = &self.buffers[id];
         match buf.path() {
             Some(path) => collapse_tilde(path),
             None if buf.is_scratch() => "scratch buffer".to_string(),
-            None => format!("{} buffer", buf.mode().name.to_lowercase()),
+            None => collapse_tilde(buf.directory()),
         }
     }
 }

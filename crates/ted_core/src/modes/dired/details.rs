@@ -1,8 +1,11 @@
-//! The `ls -l` columns of a listing: permissions, owner, group, size and modification
-//! time, read with one `lstat` per entry (plus a `readlink` per symlink).
+//! The details columns of a listing: size and modification time, plus permissions and
+//! owner where they are worth noticing. Read with one `lstat` per entry (plus a
+//! `readlink` per symlink).
 //!
-//! Formatting happens once per render into `Cells`, whose widths set the columns, so a
-//! listing lines up however long its owner names or sizes are.
+//! Permissions show only when they differ from what the umask gives a new file or
+//! directory (an executable script, a private key), and the owner only when it isn't
+//! you, so most listings are just sizes and dates. Formatting happens once per render
+//! into `Cells`, whose widths set the columns; a column no entry fills takes no space.
 
 use std::fs::DirEntry;
 use std::path::PathBuf;
@@ -13,7 +16,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Details {
     mode: u32,
     uid: u32,
-    gid: u32,
     size: u64,
     /// Seconds since the epoch.
     mtime: i64,
@@ -23,10 +25,10 @@ pub struct Details {
 
 impl Details {
     pub fn read(entry: &DirEntry) -> Option<Details> {
-        let (mode, uid, gid, size, mtime) = sys::stat(&entry.metadata().ok()?)?;
+        let (mode, uid, size, mtime) = sys::stat(&entry.metadata().ok()?)?;
         let is_link = mode & sys::S_IFMT == sys::S_IFLNK;
         let target = is_link.then(|| std::fs::read_link(entry.path()).ok()).flatten();
-        Some(Details { mode, uid, gid, size, mtime, target })
+        Some(Details { mode, uid, size, mtime, target })
     }
 
     pub fn target(&self) -> Option<&PathBuf> {
@@ -34,37 +36,61 @@ impl Details {
     }
 }
 
-/// The formatted columns of one entry.
+/// The formatted columns of one entry; empty where there is nothing to point out.
 #[derive(Default)]
 pub struct Cells {
+    /// Only when unusual (see `Formatter::usual`).
     pub permissions: String,
+    /// Only when it isn't the user.
     pub owner: String,
-    pub group: String,
     /// Empty for directories, whose size says nothing useful.
     pub size: String,
     pub modified: String,
 }
 
-/// Formats entries' details; one per render, so it caches owner and group names.
+impl Cells {
+    /// The cells in display order, each with whether it aligns right.
+    pub fn columns(&self) -> [(&str, bool); 4] {
+        [(&self.permissions, false), (&self.owner, false), (&self.size, true), (&self.modified, false)]
+    }
+}
+
+/// Formats entries' details; one per render, so it caches owner names.
 pub struct Formatter {
     now: i64,
+    uid: u32,
+    umask: u32,
     users: Vec<(u32, String)>,
-    groups: Vec<(u32, String)>,
 }
 
 impl Formatter {
     pub fn new() -> Self {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        Self { now, users: Vec::new(), groups: Vec::new() }
+        Self { now, uid: sys::uid(), umask: sys::umask(), users: Vec::new() }
     }
 
     pub fn cells(&mut self, details: &Details, is_dir: bool) -> Cells {
         Cells {
-            permissions: permissions(details.mode),
-            owner: cached_name(&mut self.users, details.uid, sys::user_name),
-            group: cached_name(&mut self.groups, details.gid, sys::group_name),
+            permissions: if self.usual(details.mode) { String::new() } else { permissions(details.mode) },
+            owner: if details.uid == self.uid {
+                String::new()
+            } else {
+                cached_name(&mut self.users, details.uid, sys::user_name)
+            },
             size: if is_dir { String::new() } else { human_size(details.size) },
             modified: self.date(details.mtime),
+        }
+    }
+
+    /// Whether `mode` is what the umask gives a new file or directory. Symlinks count as
+    /// usual (their own permissions mean nothing); devices, pipes and sockets never do.
+    fn usual(&self, mode: u32) -> bool {
+        let bits = mode & 0o7777;
+        match mode & sys::S_IFMT {
+            sys::S_IFREG => bits == 0o666 & !self.umask,
+            sys::S_IFDIR => bits == 0o777 & !self.umask,
+            sys::S_IFLNK => true,
+            _ => false,
         }
     }
 
@@ -82,7 +108,7 @@ impl Formatter {
     }
 }
 
-/// The name of user or group `id`, looked up once per render; the number when unknown.
+/// The name of user `id`, looked up once per render; the number when unknown.
 fn cached_name(cache: &mut Vec<(u32, String)>, id: u32, lookup: fn(u32) -> Option<String>) -> String {
     if let Some((_, name)) = cache.iter().find(|(cached, _)| *cached == id) {
         return name.clone();
@@ -155,10 +181,12 @@ mod sys {
     use std::ffi::CStr;
     use std::fs::Metadata;
     use std::os::unix::fs::MetadataExt;
+    use std::sync::OnceLock;
 
     use super::LocalTime;
 
     pub const S_IFMT: u32 = libc::S_IFMT as u32;
+    pub const S_IFREG: u32 = libc::S_IFREG as u32;
     pub const S_IFDIR: u32 = libc::S_IFDIR as u32;
     pub const S_IFLNK: u32 = libc::S_IFLNK as u32;
     pub const S_IFCHR: u32 = libc::S_IFCHR as u32;
@@ -166,9 +194,25 @@ mod sys {
     pub const S_IFIFO: u32 = libc::S_IFIFO as u32;
     pub const S_IFSOCK: u32 = libc::S_IFSOCK as u32;
 
-    /// (mode, uid, gid, size, mtime)
-    pub fn stat(meta: &Metadata) -> Option<(u32, u32, u32, u64, i64)> {
-        Some((meta.mode(), meta.uid(), meta.gid(), meta.size(), meta.mtime()))
+    /// (mode, uid, size, mtime)
+    pub fn stat(meta: &Metadata) -> Option<(u32, u32, u64, i64)> {
+        Some((meta.mode(), meta.uid(), meta.size(), meta.mtime()))
+    }
+
+    pub fn uid() -> u32 {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() }
+    }
+
+    /// The process's umask, read once. Linux reports it in /proc; asking with umask(2)
+    /// would briefly change it for every thread, so elsewhere the usual 022 is assumed.
+    pub fn umask() -> u32 {
+        static UMASK: OnceLock<u32> = OnceLock::new();
+        *UMASK.get_or_init(|| {
+            let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+            let value = status.lines().find_map(|line| line.strip_prefix("Umask:"));
+            value.and_then(|v| u32::from_str_radix(v.trim(), 8).ok()).unwrap_or(0o022)
+        })
     }
 
     pub fn user_name(uid: u32) -> Option<String> {
@@ -178,15 +222,6 @@ mod sys {
             let mut pwd: libc::passwd = std::mem::zeroed();
             let rc = libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), result);
             (rc, (!result.is_null()).then(|| CStr::from_ptr(pwd.pw_name).to_string_lossy().into_owned()))
-        })
-    }
-
-    pub fn group_name(gid: u32) -> Option<String> {
-        // SAFETY: as in `user_name`, for getgrgid_r.
-        with_buffer(|buf, result: &mut *mut libc::group| unsafe {
-            let mut grp: libc::group = std::mem::zeroed();
-            let rc = libc::getgrgid_r(gid, &mut grp, buf.as_mut_ptr(), buf.len(), result);
-            (rc, (!result.is_null()).then(|| CStr::from_ptr(grp.gr_name).to_string_lossy().into_owned()))
         })
     }
 
@@ -232,6 +267,7 @@ mod sys {
     use super::LocalTime;
 
     pub const S_IFMT: u32 = 0o170000;
+    pub const S_IFREG: u32 = 0o100000;
     pub const S_IFDIR: u32 = 0o040000;
     pub const S_IFLNK: u32 = 0o120000;
     pub const S_IFCHR: u32 = 0o020000;
@@ -239,15 +275,19 @@ mod sys {
     pub const S_IFIFO: u32 = 0o010000;
     pub const S_IFSOCK: u32 = 0o140000;
 
-    pub fn stat(_: &Metadata) -> Option<(u32, u32, u32, u64, i64)> {
+    pub fn stat(_: &Metadata) -> Option<(u32, u32, u64, i64)> {
         None
+    }
+
+    pub fn uid() -> u32 {
+        0
+    }
+
+    pub fn umask() -> u32 {
+        0o022
     }
 
     pub fn user_name(_: u32) -> Option<String> {
-        None
-    }
-
-    pub fn group_name(_: u32) -> Option<String> {
         None
     }
 

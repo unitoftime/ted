@@ -17,7 +17,7 @@
 //!             let _ = ed.open_file(ted_core::expand_tilde(path));
 //!         });
 //!         ed.commands.register("todo-list", "List open tasks", |ed, _| {
-//!             let id = ed.special_buffer("*todo*", "Todo List");
+//!             let id = ed.special_buffer("todo list", "Todo List");
 //!             let mut text = StyledText::new();
 //!             text.line(&[("Open tasks", Some(FaceId::HEADING))]);
 //!             ed.buffers[id].set_styled("todo", text);

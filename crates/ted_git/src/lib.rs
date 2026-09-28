@@ -17,11 +17,13 @@
 //! | `g` / `q` | refresh / quit window |
 //!
 //! `h` / `?`, `n` / `p`, `g` and `q` come from the `special` keymap every git buffer
-//! inherits.
+//! inherits. Diff buffers (`d`, and RET on a commit) show files and hunks the same way,
+//! with `TAB`, `RET` and `s` / `u` / `k` working as in the status buffer.
 //!
 //! `M-x git-blame` annotates a file buffer in place with the commit behind each line.
 
 mod blame;
+mod changes;
 mod commit;
 mod diff;
 mod git;
@@ -35,6 +37,7 @@ use std::path::{Path, PathBuf};
 
 use ted_core::{BufferId, Editor, Face, FaceId, Faces, Mode, Plugin};
 
+use crate::changes::Action;
 use crate::git::args;
 use crate::model::{Commit, RefKind};
 
@@ -51,6 +54,8 @@ pub(crate) struct GitFaces {
     pub hunk_heading: FaceId,
     pub added: FaceId,
     pub removed: FaceId,
+    pub count_added: FaceId,
+    pub count_removed: FaceId,
     pub badge_current: FaceId,
     pub badge_local: FaceId,
     pub badge_remote: FaceId,
@@ -70,6 +75,8 @@ impl GitFaces {
             hunk_heading: faces.register("git-diff-hunk-heading", Face::fg_bg(rgb(190, 190, 210), rgb(50, 55, 70))),
             added: faces.register("git-diff-added", Face::fg_bg(rgb(130, 210, 130), rgb(30, 55, 35))),
             removed: faces.register("git-diff-removed", Face::fg_bg(rgb(235, 120, 120), rgb(65, 32, 35))),
+            count_added: faces.register("git-count-added", Face::fg(rgb(130, 210, 130))),
+            count_removed: faces.register("git-count-removed", Face::fg(rgb(235, 120, 120))),
             badge_current: faces
                 .register("git-badge-current", Face::fg_bg(rgb(150, 205, 255), rgb(35, 62, 100)).bold()),
             badge_local: faces.register("git-badge-local", Face::fg_bg(rgb(100, 180, 255), rgb(30, 45, 68))),
@@ -112,18 +119,29 @@ pub(crate) fn repo(ed: &Editor) -> Option<PathBuf> {
     project.is_git().then_some(project.root)
 }
 
-/// A generated read-only buffer for `root`, found by `name` or created in `mode`.
-pub(crate) fn generated_buffer(ed: &mut Editor, name: &str, mode: &str, root: &Path) -> BufferId {
-    if let Some(id) = ed.buffers.find(|b| b.name() == name && b.path().is_none() && b.directory() == root) {
+/// The generated buffer in `mode` for repository `root`, created if needed, named
+/// `<kind>: <repository>`.
+pub(crate) fn generated_buffer(ed: &mut Editor, kind: &str, mode: &str, root: &Path) -> BufferId {
+    let found = ed.buffers.find(|b| b.path().is_none() && b.mode().name == mode && b.directory() == root);
+    if let Some(id) = found {
         return id;
     }
-    let id = ed.new_buffer(name, mode);
+    let id = ed.new_buffer(format!("{}: {}", kind, repo_name(root)), mode);
     ed.buffers[id].set_directory(root);
     id
 }
 
-pub(crate) fn repo_name(root: &Path) -> String {
+fn repo_name(root: &Path) -> String {
     root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// Runs the status buffer's version of a command at point, else the diff buffer's.
+fn at_point(ed: &mut Editor, status: impl FnOnce(&mut Editor), diff: impl FnOnce(&mut Editor)) {
+    if status::at_point(ed).is_some() {
+        status(ed)
+    } else {
+        diff(ed)
+    }
 }
 
 /// Registers a command that needs the current repository.
@@ -158,17 +176,24 @@ impl Plugin for GitPlugin {
         repo_command(ed, "git-unstage-all", "Unstage everything", |ed, root| {
             process::run(ed, root, args(&["reset", "-q"]), None, "Unstaged all", |_| {})
         });
+        repo_command(ed, "git-process", "Show the git commands run in this repository", process::show);
 
         let c = &mut ed.commands;
-        c.register("git-toggle", "Expand or collapse the item at point", |ed, _| status::toggle(ed));
-        c.register("git-visit", "Visit the file or commit at point", |ed, _| status::visit(ed));
-        c.register("git-stage", "Stage the change at point", |ed, _| status::stage(ed));
-        c.register("git-unstage", "Unstage the change at point", |ed, _| status::unstage(ed));
-        c.register("git-discard", "Discard the change at point", |ed, _| status::discard(ed));
-        c.register("git-process", "Show the git process log", |ed, _| process::show(ed));
+        c.register("git-toggle", "Expand or collapse the item at point", |ed, _| {
+            at_point(ed, status::toggle, diff::toggle)
+        });
+        c.register("git-visit", "Visit the file or commit at point", |ed, _| at_point(ed, status::visit, diff::visit));
+        for (name, doc, action) in [
+            ("git-stage", "Stage the change at point", Action::Stage),
+            ("git-unstage", "Unstage the change at point", Action::Unstage),
+            ("git-discard", "Discard the change at point", Action::Discard),
+        ] {
+            c.register(name, doc, move |ed, _| {
+                at_point(ed, |ed| status::act(ed, action), |ed| diff::act(ed, action))
+            });
+        }
         c.register("git-log-visit", "Show the commit at point", |ed, _| log::visit(ed));
-        c.register("git-diff-visit", "Visit the file line of the diff line at point", |ed, _| diff::visit(ed));
-        c.register("git-diff-refresh", "Rerun the diff", |ed, _| diff::refresh(ed));
+        c.register("git-diff-refresh", "Rerun the diff", |ed, _| diff::rerun(ed));
         c.register("git-commit-finish", "Commit with this message", |ed, _| commit::finish(ed));
         c.register("git-commit-cancel", "Abandon this commit message", |ed, _| commit::cancel(ed));
         blame::register(ed);
@@ -233,7 +258,18 @@ impl Plugin for GitPlugin {
             ],
         );
         ed.bind_all("git-log", &[("RET", "git-log-visit"), ("d", "git-diff"), ("$", "git-process")]);
-        ed.bind_all("git-diff", &[("RET", "git-diff-visit"), ("d", "git-diff"), ("$", "git-process")]);
+        ed.bind_all(
+            "git-diff",
+            &[
+                ("TAB", "git-toggle"),
+                ("RET", "git-visit"),
+                ("s", "git-stage"),
+                ("u", "git-unstage"),
+                ("k", "git-discard"),
+                ("d", "git-diff"),
+                ("$", "git-process"),
+            ],
+        );
         ed.bind_all("git-commit", &[("C-c C-c", "git-commit-finish"), ("C-c C-k", "git-commit-cancel")]);
     }
 }

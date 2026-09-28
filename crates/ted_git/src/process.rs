@@ -1,18 +1,18 @@
-//! Running git commands from the UI: mutations are logged to `*git-process*` and followed
-//! by a status refresh; queries hand their output to a callback. Both run as jobs.
+//! Running git commands from the UI: mutations are logged to the repository's
+//! `git process` buffer and followed by a status refresh; queries hand their output to a callback. Both run as jobs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ted_core::{Editor, FaceId, StyledText};
 
 use crate::git::{git, git_output, GitOutput};
-use crate::status;
-use crate::GitFaces;
+use crate::{diff, status};
+use crate::{generated_buffer, GitFaces};
 
-pub const BUFFER: &str = "*git-process*";
 pub const MODE: &str = "Git Process";
 
-/// Runs a git command that changes the repository, then refreshes its status buffer.
+/// Runs a git command that changes the repository, then refreshes its status and diff
+/// buffers.
 /// `on_success` runs on the UI thread after a successful run.
 pub fn run(
     ed: &mut Editor,
@@ -28,7 +28,7 @@ pub fn run(
     ed.spawn(move |ctx| {
         let output = git_output(&root, &args, stdin.as_deref());
         ctx.send(move |ed| {
-            log(ed, &label, &output);
+            log(ed, &root, &label, &output);
             if output.ok {
                 ed.set_status(done);
                 on_success(ed);
@@ -38,6 +38,7 @@ pub fn run(
                 ed.set_status(format!("{} failed: {} ($ for details)", label, reason.trim()));
             }
             status::refresh(ed, &root);
+            diff::refresh(ed, root);
         });
     });
 }
@@ -58,18 +59,18 @@ pub fn query(
     });
 }
 
-fn log(ed: &mut Editor, label: &str, output: &GitOutput) {
+fn log(ed: &mut Editor, root: &Path, label: &str, output: &GitOutput) {
     let faces = *ed.ext_mut::<GitFaces>();
     let mut text = StyledText::new();
     text.line(&[(&format!("$ {}", label), Some(if output.ok { faces.section } else { FaceId::ERROR }))]);
     text.line(&[(&output.stdout, None), (&output.stderr, None)]);
-    let id = ed.special_buffer(BUFFER, MODE);
+    let id = generated_buffer(ed, "git process", MODE, root);
     ed.buffers[id].append_styled("git-process", text);
 }
 
-/// `$`: shows the process log.
-pub fn show(ed: &mut Editor) {
-    let id = ed.special_buffer(BUFFER, MODE);
+/// `$`: shows the process log of `root`.
+pub fn show(ed: &mut Editor, root: PathBuf) {
+    let id = generated_buffer(ed, "git process", MODE, &root);
     ed.show_buffer(id);
     let end = ed.buffers[id].len_chars();
     ed.doc().set_cursor(end);

@@ -1,7 +1,7 @@
 //! Help: M-x, prefix help, mode help (`h` in special buffers), and the `describe-*`
 //! commands. Everything shown is derived from the command and settings registries and the
 //! live keymaps, so it never drifts from the actual bindings. Descriptions go to the
-//! `*Help*` buffer and end with the `init.rhai` line that changes what they describe, so
+//! `help` buffer and end with the `init.rhai` line that changes what they describe, so
 //! rebinding starts from `describe-key`.
 
 use std::collections::HashSet;
@@ -17,7 +17,7 @@ use crate::settings::Value;
 use crate::ui::{Menu, Modal, PickerItem};
 
 const MAX_KEYS_SHOWN: usize = 3;
-const HELP_BUFFER: &str = "*Help*";
+const HELP_BUFFER: &str = "help";
 const DESCRIBE_KEY_MAP: &str = "describe-key";
 
 pub fn register(ed: &mut Editor) {
@@ -102,7 +102,7 @@ pub fn register(ed: &mut Editor) {
     ed.define_mode(Mode::new("Help").special());
 }
 
-/// Shows `text` in the `*Help*` buffer, from the top.
+/// Shows `text` in the `help` buffer, from the top.
 pub fn show_help(ed: &mut Editor, text: StyledText) {
     let id = ed.special_buffer(HELP_BUFFER, "Help");
     ed.buffers[id].set_styled("help", text);
@@ -239,7 +239,7 @@ fn describe_setting(ed: &mut Editor, name: String) {
     show_help(ed, text);
 }
 
-/// `*Help*` listing of the active buffer's layers: minor keymaps, the mode's keymap (and
+/// `help` listing of the active buffer's layers: minor keymaps, the mode's keymap (and
 /// the maps it inherits from), then global, each with the name `init.rhai` refers to it by.
 fn describe_bindings(ed: &mut Editor) {
     let id = ed.active_buffer_id();

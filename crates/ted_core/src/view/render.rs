@@ -226,7 +226,8 @@ impl Doc<'_> {
         }
     }
 
-    /// Name, state and mode; `position` adds line/column info for text buffers.
+    /// Name, modified marker and mode (unless the name says it); `position` adds line/column
+    /// info for text buffers.
     fn render_modeline(
         &self,
         frame: &mut Frame,
@@ -250,10 +251,17 @@ impl Doc<'_> {
             }
             None => String::new(),
         };
-        let dirty = if self.buf.is_dirty() { "*" } else { "-" };
-        let text = format!(" {} {}{}   ({}) ", dirty, self.buf.name(), location, self.buf.mode().name);
+        let dirty = if self.buf.is_dirty() { "*" } else { " " };
+        let (name, mode) = (self.buf.name(), &self.buf.mode().name);
+        // Generated buffers are named after their mode (`terminal`, `git log: ted`).
+        let mode = if starts_with_ignore_case(name, mode) { String::new() } else { format!("   ({})", mode) };
+        let text = format!(" {} {}{}{} ", dirty, name, location, mode);
         frame.draw_text_clipped(bounds.x + 8.0, y, text, cx.faces.text(face), rect);
     }
+}
+
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix))
 }
 
 /// Writes each jump label over the cells of its target (extending the row when a label

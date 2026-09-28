@@ -149,10 +149,9 @@ pub fn list_mode(name: &str) -> Mode {
     Mode::new(name).tab_width(8).parent_keymap(KEYMAP).special()
 }
 
-/// Writes `items` into the buffer called `name` (created in mode `mode` if needed) after
-/// `header`, grouped by file in the order files first appear, each file's items by
-/// position. The buffer becomes the current list for `next-error`; showing it is up to
-/// the caller.
+/// Writes `items` into the list buffer of mode `mode`, named `name`, after `header`,
+/// grouped by file in the order files first appear, each file's items by position. The
+/// buffer becomes the current list for `next-error`; showing it is up to the caller.
 pub fn fill_list(ed: &mut Editor, name: &str, mode: &str, header: &str, items: &[ListItem]) -> BufferId {
     let mut first_seen: HashMap<&Path, usize> = HashMap::new();
     for (i, item) in items.iter().enumerate() {

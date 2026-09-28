@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ted_core::rows::{self, RowSpec, RowText};
 use ted_core::{Editor, FaceId};
 
-use crate::{diff, generated_buffer, model, process, repo_name, GitFaces};
+use crate::{diff, generated_buffer, model, process, GitFaces};
 
 pub const MODE: &str = "Git Log";
 const LOG_LIMIT: usize = 256;
@@ -29,7 +29,7 @@ pub fn open(ed: &mut Editor, root: PathBuf) {
             parts.push((&meta, Some(FaceId::SHADOW)));
             text.row(RowSpec::new(&commit.hash), &parts);
         }
-        let id = generated_buffer(ed, &format!("git-log: {}", repo_name(&root)), MODE, &root);
+        let id = generated_buffer(ed, "git log", MODE, &root);
         ed.show_buffer(id);
         ed.buffers[id].local_mut::<LogBuffer>().hashes = commits.into_iter().map(|c| c.hash).collect();
         text.install(ed, id, "git");
@@ -42,6 +42,6 @@ pub fn visit(ed: &mut Editor) {
     let hash = buf.local::<LogBuffer>().zip(rows::at_point(ed)).and_then(|(log, row)| log.hashes.get(row).cloned());
     let root = buf.directory();
     if let Some(hash) = hash {
-        diff::commit(ed, root, hash);
+        diff::show(ed, root, diff::Source::Commit(hash));
     }
 }

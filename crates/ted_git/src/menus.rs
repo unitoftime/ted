@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use ted_core::{Editor, Menu, PickerItem};
 
 use crate::git::args;
-use crate::{commit, diff, model, process, status};
+use crate::diff::{self, Source};
+use crate::{commit, model, process, status};
 
 fn run(root: &Path, list: &'static [&'static str], done: &'static str) -> impl FnOnce(&mut Editor) {
     let root = root.to_path_buf();
@@ -24,28 +25,30 @@ pub fn commit(ed: &mut Editor, root: PathBuf) {
 }
 
 pub fn diff(ed: &mut Editor, root: PathBuf) {
-    let (r1, r2, r3, r4, r5) = (root.clone(), root.clone(), root.clone(), root.clone(), root.clone());
+    let show = |source: Source| {
+        let root = root.clone();
+        move |ed: &mut Editor| diff::show(ed, root, source)
+    };
+    let prompt = |id: &'static str, label: &'static str, initial: &'static str, source: fn(String) -> Source| {
+        let root = root.clone();
+        move |ed: &mut Editor| {
+            ed.prompt(id, label, initial, move |ed, input| {
+                if !input.is_empty() {
+                    diff::show(ed, root, source(input));
+                }
+            })
+        }
+    };
+    let dwim_root = root.clone();
     let menu = Menu::new("git-diff", "Diff")
         .group("Diff")
-        .entry('d', "Dwim (thing at point)", move |ed| diff::dwim(ed, r1))
-        .entry('u', "Unstaged", move |ed| diff::unstaged(ed, r2))
-        .entry('s', "Staged", move |ed| diff::staged(ed, r3))
-        .entry('w', "Worktree (vs HEAD)", move |ed| diff::worktree(ed, r4))
+        .entry('d', "Dwim (thing at point)", move |ed| diff::dwim(ed, dwim_root))
+        .entry('u', "Unstaged", show(Source::Unstaged))
+        .entry('s', "Staged", show(Source::Staged))
+        .entry('w', "Worktree (vs HEAD)", show(Source::Worktree))
         .group("Compare")
-        .entry('r', "Range (A..B)", move |ed| {
-            ed.prompt("git-diff-range", "Diff range: ", "", move |ed, range| {
-                if !range.is_empty() {
-                    diff::range(ed, r5, range);
-                }
-            })
-        })
-        .entry('c', "Show commit", move |ed| {
-            ed.prompt("git-show-commit", "Show commit: ", "HEAD", move |ed, rev| {
-                if !rev.is_empty() {
-                    diff::commit(ed, root, rev);
-                }
-            })
-        });
+        .entry('r', "Range (A..B)", prompt("git-diff-range", "Diff range: ", "", Source::Range))
+        .entry('c', "Show commit", prompt("git-show-commit", "Show commit: ", "HEAD", Source::Commit));
     ed.push_modal(menu);
 }
 

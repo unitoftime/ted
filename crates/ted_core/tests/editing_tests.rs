@@ -356,7 +356,7 @@ fn test_compilation_errors_are_a_location_list() {
 
     let output = "printf 'a.c:2:6: error: expected semicolon\\nnoise\\na.c:3:1: warning: w\\n'; exit 2";
     editor.execute_with("compile", ted_core::Arg::Str(output.into()));
-    wait_until(&mut editor, |ed| ed.status.starts_with("Compilation exited abnormally with code 2"));
+    wait_until(&mut editor, |ed| ed.status.starts_with("Compilation failed with exit code 2"));
     assert!(editor.status.ends_with("(1 error, 1 warning)"), "{}", editor.status);
 
     // M-g n visits each error in turn from the compilation buffer's window
