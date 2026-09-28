@@ -42,6 +42,13 @@ impl Value {
         }
     }
 
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// `self` converted to the kind of `like`, if they are compatible (integers are
     /// accepted for numbers).
     fn coerce_to(&self, like: &Value) -> Option<Value> {
@@ -128,6 +135,12 @@ impl From<&str> for Value {
     }
 }
 
+impl From<Vec<Value>> for Value {
+    fn from(items: Vec<Value>) -> Self {
+        Value::List(items)
+    }
+}
+
 impl From<Map> for Value {
     fn from(map: Map) -> Self {
         Value::Map(map)
@@ -173,6 +186,16 @@ impl SettingType for String {
         match value {
             Value::Str(s) => s,
             _ => "",
+        }
+    }
+}
+
+impl SettingType for Vec<Value> {
+    type Ref<'a> = &'a [Value];
+    fn read(value: &Value) -> &[Value] {
+        match value {
+            Value::List(items) => items,
+            _ => &[],
         }
     }
 }

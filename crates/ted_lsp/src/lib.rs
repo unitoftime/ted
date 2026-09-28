@@ -11,13 +11,15 @@
 //! - formats (`format-buffer`, `format_on_save`, see `ted_core::format`);
 //! - shows the documentation of the symbol at point (`lsp-hover`, `C-c .`);
 //! - renames a symbol across the project (`lsp-rename`);
+//! - organizes imports (`organize-imports`), and applies a mode's `lsp.save_actions`
+//!   (`source.organizeImports`) before its buffers are saved;
 //! - reports diagnostics, underlined in the buffer and listed by `lsp-diagnostics`
 //!   (`C-c !`).
 //!
 //! Settings (`init.rhai`): `lsp.enabled`, `lsp.diagnostics`, `lsp.server` (the server's
-//! command line, empty for none) and `lsp.settings` (a map sent as the server's
-//! configuration). Servers are per mode, so the last two are set in one:
-//! `mode("go", #{ "lsp.settings": #{ staticcheck: true } })`. `M-x lsp-restart` restarts
+//! command line, empty for none), `lsp.settings` (a map sent as the server's
+//! configuration) and `lsp.save_actions`. Servers are per mode, so the last three are set
+//! in one: `mode("go", #{ "lsp.settings": #{ staticcheck: true } })`. `M-x lsp-restart` restarts
 //! the active buffer's server, picking up changed settings.
 
 mod client;
@@ -28,12 +30,14 @@ mod hover;
 mod protocol;
 mod rename;
 mod servers;
+mod source_actions;
 mod transport;
+mod workspace_edit;
 mod xref;
 
 use std::time::Duration;
 
-use ted_core::{chain, Editor, KeymapDef, KeymapId, Map, Plugin, Setting};
+use ted_core::{chain, Editor, KeymapDef, KeymapId, Map, Plugin, Setting, Value};
 
 use crate::servers::SERVERS;
 
@@ -51,6 +55,8 @@ pub(crate) struct Handles {
     pub server: Setting<String>,
     /// A mode's server configuration: initialization options and `workspace/configuration`.
     pub config: Setting<Map>,
+    /// Kinds of source actions a mode's buffers get before they are saved.
+    pub save_actions: Setting<Vec<Value>>,
     /// Keys of buffers attached to a server (a minor keymap).
     pub keymap: KeymapId,
 }
@@ -68,6 +74,7 @@ impl Plugin for LspPlugin {
         diagnostics::register(ed);
         hover::register(ed);
         rename::register(ed);
+        source_actions::register(ed);
         ed.commands.register("lsp-restart", "Restart the language server of this buffer", |ed, _| {
             client::restart(ed);
         });
@@ -78,6 +85,11 @@ impl Plugin for LspPlugin {
             diagnostics: s.define("lsp.diagnostics", true, "Show language server errors and warnings in buffers"),
             server: s.define::<String>("lsp.server", "", "Command line of the mode's language server (empty for none)"),
             config: s.define("lsp.settings", Map::new(), "Configuration sent to the mode's language server"),
+            save_actions: s.define(
+                "lsp.save_actions",
+                Vec::new(),
+                "Source actions the language server applies before saving, e.g. [\"source.organizeImports\"]",
+            ),
             keymap: ed
                 .define_keymap(KeymapDef::new("lsp").keys(&[("C-c !", "lsp-diagnostics"), ("C-c .", "lsp-hover")])),
         };

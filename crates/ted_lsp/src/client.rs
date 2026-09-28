@@ -48,6 +48,7 @@ pub struct Capabilities {
     pub rename: bool,
     pub formatting: bool,
     pub range_formatting: bool,
+    pub code_actions: bool,
     /// Takes the edits made to a document rather than its whole text.
     pub incremental_sync: bool,
 }
@@ -63,6 +64,7 @@ impl Capabilities {
             rename: provides("renameProvider"),
             formatting: provides("documentFormattingProvider"),
             range_formatting: provides("documentRangeFormattingProvider"),
+            code_actions: provides("codeActionProvider"),
             incremental_sync: sync == Some(2),
         }
     }
@@ -473,6 +475,10 @@ fn initialize_params(root: &Path, root_uri: &str, settings: Value) -> Value {
                 "rename": {},
                 "formatting": {},
                 "rangeFormatting": {},
+                // Actions carry their edits: no `codeAction/resolve`, no commands to run.
+                "codeAction": {
+                    "codeActionLiteralSupport": { "codeActionKind": { "valueSet": ["source", "source.organizeImports"] } },
+                },
             },
             "workspace": {
                 "configuration": true,
