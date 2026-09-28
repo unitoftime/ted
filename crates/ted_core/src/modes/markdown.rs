@@ -60,7 +60,7 @@ pub fn register(ed: &mut Editor) {
             .comment("<!-- ")
             .extensions(&["md", "markdown"])
             .grammar(syntax::markdown)
-            .line_face(|line| is_done_task(line).then_some(FaceId::SHADOW)),
+            .line_face(|_, line| is_done_task(line).then_some(FaceId::SHADOW)),
     );
     ed.bind_all("markdown", &[("S-RET", "markdown-insert-list-item"), ("TAB", "markdown-indent")]);
 }

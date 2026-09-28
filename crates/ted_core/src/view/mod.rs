@@ -8,7 +8,7 @@ use std::ops::Range;
 pub use render::{BufferRenderer, RenderCtx};
 pub use visual::{rows_for_width, DisplayLine, ScreenLine, VisualLine, NO_WRAP, WIDE_CONTINUATION};
 
-use crate::buffer::{BufferId, Buffers};
+use crate::buffer::{BufferId, Buffers, Place};
 use crate::frame::{Metrics, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -39,14 +39,6 @@ pub struct JumpLabel {
     pub text: String,
 }
 
-/// A buffer a view left, with the position to restore.
-#[derive(Debug, Clone)]
-pub struct PreviousBuffer {
-    pub buffer: BufferId,
-    pub cursor: Cursor,
-    pub top_line: usize,
-}
-
 #[derive(Debug, Clone)]
 pub struct View {
     id: ViewId,
@@ -66,8 +58,9 @@ pub struct View {
     pub jump: Option<Vec<JumpLabel>>,
     /// What this view showed before its current buffer, most recent last, for
     /// `quit-window`. Each buffer appears at most once and never while it is shown, so
-    /// going back always reaches something older instead of cycling.
-    pub back: Vec<PreviousBuffer>,
+    /// going back always reaches something older instead of cycling. Positions are the
+    /// buffers' own places.
+    pub back: Vec<BufferId>,
     /// Where the cursor was when the view was scrolled away from it (mouse wheel). Until
     /// the cursor moves, rendering keeps that scroll rather than bringing the cursor back.
     pub(crate) scrolled_from: Option<usize>,
@@ -138,28 +131,45 @@ impl View {
         (row.min(self.text_rows() - 1), col.min(cols))
     }
 
-    /// Shows `buffer` from its start, remembering the current buffer and position.
-    pub fn set_buffer(&mut self, buffer: BufferId) {
-        if buffer != self.buffer {
-            self.back.retain(|p| p.buffer != buffer);
-            self.back.push(PreviousBuffer {
-                buffer: self.buffer,
-                cursor: self.cursor.clone(),
-                top_line: self.top_line,
-            });
+    /// Shows `buffer` where a window last left it, remembering the current buffer and
+    /// leaving this window's position in it. Showing the buffer already shown does nothing.
+    pub fn set_buffer(&mut self, buffers: &mut Buffers, buffer: BufferId) {
+        if buffer == self.buffer {
+            return;
         }
-        self.show(buffer);
+        if buffers.contains(self.buffer) {
+            self.remember_place(buffers);
+            self.back.retain(|&b| b != buffer);
+            self.back.push(self.buffer);
+        }
+        self.show(buffers, buffer);
     }
 
-    /// Shows `buffer` from its start without touching the back stack.
-    fn show(&mut self, buffer: BufferId) {
+    /// Shows `buffer` at its place (kept inside its text) without touching the back stack.
+    fn show(&mut self, buffers: &Buffers, buffer: BufferId) {
+        let buf = &buffers[buffer];
+        let place = buf.place();
         self.buffer = buffer;
-        self.cursor = Cursor::default();
-        self.top_line = 0;
+        self.cursor = Cursor { pos: place.pos, mark: place.mark, ..Cursor::default() };
+        self.top_line = place.top_line;
         self.top_row = 0;
         self.left_col = 0;
         self.highlight = None;
         self.jump = None;
+        self.clamp(buf.len_chars(), buf.len_lines());
+    }
+
+    /// This view's position in its buffer.
+    pub fn place(&self) -> Place {
+        Place { pos: self.cursor.pos, mark: self.cursor.mark, top_line: self.top_line }
+    }
+
+    /// Leaves this view's position in its buffer (if it still exists), for the next view
+    /// that shows it.
+    pub(crate) fn remember_place(&self, buffers: &mut Buffers) {
+        if let Some(buf) = buffers.get_mut(self.buffer) {
+            buf.set_place(self.place());
+        }
     }
 
     /// Puts the cursor at `pos` with no mark (callers that edit through a `Doc` get
@@ -189,25 +199,19 @@ impl View {
     }
 
     /// Leaves the current buffer for the most recent one on the back stack still in
-    /// `buffers`, at its old position (clamped to its text, which may have shrunk since).
-    /// With nothing to go back to, shows `fallback` from the start.
-    pub fn go_back(&mut self, buffers: &Buffers, fallback: BufferId) {
-        while let Some(p) = self.back.pop() {
-            let Some(buffer) = buffers.get(p.buffer) else { continue };
-            self.show(p.buffer);
-            self.cursor = p.cursor;
-            self.top_line = p.top_line;
-            self.clamp(buffer.len_chars(), buffer.len_lines());
-            return;
-        }
-        if fallback != self.buffer {
-            self.show(fallback);
+    /// `buffers`, at its place. With nothing to go back to, shows `fallback`.
+    pub fn go_back(&mut self, buffers: &mut Buffers, fallback: BufferId) {
+        self.remember_place(buffers);
+        let previous = std::iter::from_fn(|| self.back.pop()).find(|&b| buffers.contains(b));
+        let target = previous.unwrap_or(fallback);
+        if target != self.buffer {
+            self.show(buffers, target);
         }
     }
 
     /// Drops `buffer` from the back stack (it was killed).
     pub(crate) fn forget(&mut self, buffer: BufferId) {
-        self.back.retain(|p| p.buffer != buffer);
+        self.back.retain(|&b| b != buffer);
     }
 
     /// Text rows available (the last row is the modeline).

@@ -228,7 +228,7 @@ fn hop(ed: &mut Editor, back: bool) {
 fn show_mark(ed: &mut Editor, mark: &Mark) -> bool {
     if ed.buffers.contains(mark.buffer) {
         if ed.active_buffer_id() != mark.buffer {
-            ed.active_view_mut().set_buffer(mark.buffer);
+            ed.show_in_active_view(mark.buffer);
         }
     } else if let Some(path) = &mark.path {
         if ed.open_file(path).is_err() {

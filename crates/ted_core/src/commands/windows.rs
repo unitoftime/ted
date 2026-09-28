@@ -16,10 +16,12 @@ pub fn register(ed: &mut Editor) {
         ed.set_status("Split window right");
     });
     c.register("delete-other-windows", "Maximize the active window, closing all others", |ed, _| {
+        ed.remember_places();
         ed.layout.maximize_active();
         ed.set_status("Maximized current window");
     });
     c.register("delete-window", "Close the active window (exits when it is the last)", |ed, _| {
+        ed.remember_places();
         if ed.layout.close_active() {
             ed.set_status("Closed window");
         } else {
@@ -41,19 +43,19 @@ pub fn register(ed: &mut Editor) {
     });
     c.register("restore-window-layout", "Restore the window layout from a numbered slot", |ed, arg| {
         let slot = arg.int().unwrap_or(1) as usize;
-        match ed.saved_layouts.get(&slot) {
-            Some(saved) => {
-                ed.layout.restore(saved);
-                // Buffers may have shrunk since the layout was saved.
-                let Editor { layout, buffers, .. } = ed;
-                for view in layout.views_mut() {
-                    let buffer = &buffers[view.buffer];
-                    view.clamp(buffer.len_chars(), buffer.len_lines());
-                }
-                ed.set_status(format!("Loaded layout from slot {}", slot));
-            }
-            None => ed.set_status(format!("Slot {} is empty", slot)),
+        if !ed.saved_layouts.contains_key(&slot) {
+            ed.set_status(format!("Slot {} is empty", slot));
+            return;
         }
+        ed.remember_places();
+        let Editor { layout, buffers, saved_layouts, .. } = ed;
+        layout.restore(&saved_layouts[&slot]);
+        // Buffers may have shrunk since the layout was saved.
+        for view in layout.views_mut() {
+            let buffer = &buffers[view.buffer];
+            view.clamp(buffer.len_chars(), buffer.len_lines());
+        }
+        ed.set_status(format!("Loaded layout from slot {}", slot));
     });
 
     c.register("quit-window", "Go back to what this window showed before", |ed, _| {

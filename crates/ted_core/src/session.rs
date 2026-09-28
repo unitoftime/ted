@@ -124,7 +124,7 @@ impl Session {
                 SavedBuffer::Generated { command, directory } => {
                     let stage = *staging.get_or_insert_with(|| ed.add_buffer(Buffer::new("*restoring*", "")));
                     ed.buffers[stage].set_directory(directory);
-                    ed.active_view_mut().set_buffer(stage);
+                    ed.show_in_active_view(stage);
                     ed.execute(command);
                     Some(ed.active_buffer_id()).filter(|&id| id != stage)
                 }

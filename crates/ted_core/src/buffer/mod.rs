@@ -73,6 +73,17 @@ pub struct Buffer {
     /// Minor keymaps, consulted above the mode's keymap; the last enabled wins.
     keymaps: Vec<KeymapId>,
     margin: Option<Margin>,
+    /// Where the last window to leave the buffer was, for the next one to show it.
+    place: Place,
+}
+
+/// A position in a buffer that outlives the windows showing it: the cursor, mark and
+/// scroll a window returns to. Edits move it along with the text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Place {
+    pub pos: usize,
+    pub mark: Option<usize>,
+    pub top_line: usize,
 }
 
 /// Per-line annotations drawn left of the line numbers (e.g. git blame). A margin
@@ -110,6 +121,7 @@ impl Buffer {
             renderer: None,
             keymaps: Vec::new(),
             margin: None,
+            place: Place::default(),
         }
     }
 
@@ -179,6 +191,15 @@ impl Buffer {
     /// Sets the working directory used while the buffer visits no file.
     pub fn set_directory(&mut self, dir: impl Into<PathBuf>) {
         self.directory = Some(dir.into());
+    }
+
+    /// Where a window showing the buffer should start (see `Place`).
+    pub fn place(&self) -> Place {
+        self.place
+    }
+
+    pub fn set_place(&mut self, place: Place) {
+        self.place = place;
     }
 
     pub fn is_scratch(&self) -> bool {
@@ -293,6 +314,9 @@ impl Buffer {
 
     /// Records the change `edit` made to the text.
     fn changed(&mut self, edit: Edit) {
+        let edits = std::slice::from_ref(&edit);
+        self.place.pos = map_pos(edits, self.place.pos);
+        self.place.mark = self.place.mark.map(|mark| map_pos(edits, mark));
         self.journal.record(self.version, edit);
         self.version += 1;
     }
@@ -406,9 +430,11 @@ impl Buffer {
     }
 
     /// Replaces the whole text and starts a fresh, clean history (used by generated
-    /// buffers such as dired and compilation output). Ignores read-only.
+    /// buffers such as dired and compilation output). Ignores read-only. New content is
+    /// shown from its start.
     pub fn set_text(&mut self, text: &str) {
         self.replace_text(Rope::from_str(text));
+        self.place = Place::default();
     }
 
     fn replace_text(&mut self, text: Rope) {

@@ -2,10 +2,10 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::buffer::{map_pos, Buffer, BufferId, Edit};
+use crate::buffer::{map_pos, Buffer, BufferId, Edit, Place};
 use crate::editor::Editor;
 use crate::plugin::{Hooks, SaveToken};
 use crate::text::{absolutize, collapse_tilde};
@@ -20,6 +20,10 @@ struct PendingSave {
     next_hook: usize,
     then: SaveDone,
 }
+
+/// Where killed file buffers were, restored when their file is visited again.
+#[derive(Default)]
+struct FilePlaces(HashMap<PathBuf, Place>);
 
 /// Saves waiting on `before_save` hooks, by serial.
 #[derive(Default)]
@@ -71,7 +75,7 @@ impl Editor {
         }
         let id = self.visit_file(&path)?;
         self.recent_files.touch(&path);
-        self.active_view_mut().set_buffer(id);
+        self.show_in_active_view(id);
         let name = self.buffers[id].name().to_string();
         self.set_status(format!("Opened {}", name));
         Ok(id)
@@ -89,6 +93,9 @@ impl Editor {
         }
         let mut buffer = Buffer::from_file(path)?;
         buffer.set_mode(self.modes.for_path(Some(path)));
+        if let Some(place) = self.ext_mut::<FilePlaces>().0.remove(path) {
+            buffer.set_place(place);
+        }
         let id = self.add_buffer(buffer);
         self.run_buffer_hooks(|h| &h.buffer_opened, id);
         Ok(id)
@@ -101,8 +108,25 @@ impl Editor {
             Some(view) => {
                 self.layout.set_active(view);
             }
-            None => self.active_view_mut().set_buffer(id),
+            None => self.show_in_active_view(id),
         }
+    }
+
+    /// Shows `id` in the active view, where a view last left it.
+    pub fn show_in_active_view(&mut self, id: BufferId) {
+        let Editor { layout, buffers, .. } = self;
+        layout.active_mut().set_buffer(buffers, id);
+    }
+
+    /// Leaves every view's position in its buffer, for when views close or the layout is
+    /// replaced. The active view's wins where several show one buffer.
+    pub fn remember_places(&mut self) {
+        let Editor { layout, buffers, .. } = self;
+        let active = layout.active_id();
+        for view in layout.views().into_iter().filter(|v| v.id() != active) {
+            view.remember_place(buffers);
+        }
+        layout.active().remember_place(buffers);
     }
 
     /// The `*scratch*` buffer, recreated if it was saved to a file or killed.
@@ -193,21 +217,24 @@ impl Editor {
         let name = self.buffers[id].name().to_string();
         if self.buffers[id].is_scratch() && self.buffers.len() == 1 {
             self.buffers[id].set_text("");
-            for view in self.layout.views_mut() {
-                view.set_buffer(id);
-            }
+            self.clamp_views(id);
             self.set_status("Cleared scratch buffer");
             return;
         }
 
         self.run_buffer_hooks(|h| &h.buffer_killed, id);
+        self.remember_places();
+        if let Some(path) = self.buffers[id].path().map(Path::to_path_buf) {
+            let place = self.buffers[id].place();
+            self.ext_mut::<FilePlaces>().0.insert(path, place);
+        }
         self.buffers.remove(id);
         let last = self.buffers.iter().next_back().map(|(other, _)| other);
         let replacement = match last {
             Some(other) => other,
             None => self.ensure_scratch(),
         };
-        let buffers = &self.buffers;
+        let buffers = &mut self.buffers;
         for view in self.layout.views_mut() {
             view.forget(id);
             if view.buffer == id {
@@ -218,7 +245,7 @@ impl Editor {
             for view in saved.views_mut() {
                 view.forget(id);
                 if view.buffer == id {
-                    view.set_buffer(replacement);
+                    view.set_buffer(buffers, replacement);
                 }
             }
         }

@@ -233,7 +233,7 @@ impl Plugin for GitPlugin {
         ed.define_mode(Mode::new(log::MODE).special().revert("git-log"));
         ed.define_mode(Mode::new(diff::MODE).special().revert("git-diff-refresh"));
         ed.define_mode(Mode::new(process::MODE).special());
-        ed.define_mode(Mode::new(commit::MODE));
+        ed.define_mode(commit::mode());
 
         ed.bind_all("global", &[("C-x g", "git-status")]);
         ed.bind_all(

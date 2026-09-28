@@ -53,7 +53,7 @@ pub mod view;
 pub mod watch;
 pub mod xref;
 
-pub use buffer::{Buffer, BufferId, Buffers, Decoration, Edit, Margin, StyledText};
+pub use buffer::{Buffer, BufferId, Buffers, Decoration, Edit, Margin, Place, StyledText};
 pub use command::{Arg, CommandId, Commands};
 pub use config::ConfigOp;
 pub use doc::Doc;

@@ -202,7 +202,7 @@ fn show(ed: &mut Editor, dir: &Path, focus: Option<&OsStr>) -> io::Result<Buffer
     let existing = ed.buffers.find_path(dir).filter(|&id| ed.buffers[id].local::<Dired>().is_some());
     let listing = read(ed, existing, dir)?;
     let id = existing.unwrap_or_else(|| ed.new_buffer("", MODE));
-    ed.active_view_mut().set_buffer(id);
+    ed.show_in_active_view(id);
     install(ed, id, dir, listing);
     focus_entry(ed, focus);
     ed.set_status(format!("Directory {}", anchor_directory(dir)));

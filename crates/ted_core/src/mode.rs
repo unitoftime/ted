@@ -37,8 +37,9 @@ impl Default for Indentation {
 
 pub type GrammarLoader = fn() -> Option<Arc<Grammar>>;
 
-/// Chooses a face for a whole line from its text (drawn instead of syntax highlighting).
-pub type LineFace = Arc<dyn Fn(&str) -> Option<FaceId> + Send + Sync>;
+/// Chooses a face for a whole line from its index and text (drawn instead of syntax
+/// highlighting).
+pub type LineFace = Arc<dyn Fn(usize, &str) -> Option<FaceId> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Mode {
@@ -63,7 +64,7 @@ pub struct Mode {
     /// (`reload-ted`). It runs with a buffer in the saved working directory active and must
     /// show its buffer in the active window before it returns.
     pub restore: Option<String>,
-    /// Faces for whole lines, e.g. dimmed checked markdown tasks.
+    /// Faces for whole lines, e.g. dimmed checked markdown tasks or a commit's summary.
     pub line_face: Option<LineFace>,
     /// Colors of the text and background instead of `default`'s, e.g. a terminal's own.
     pub face: Option<FaceId>,
@@ -183,7 +184,7 @@ impl Mode {
         self
     }
 
-    pub fn line_face(mut self, f: impl Fn(&str) -> Option<FaceId> + Send + Sync + 'static) -> Self {
+    pub fn line_face(mut self, f: impl Fn(usize, &str) -> Option<FaceId> + Send + Sync + 'static) -> Self {
         self.line_face = Some(Arc::new(f));
         self
     }

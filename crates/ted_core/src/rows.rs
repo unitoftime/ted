@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use crate::buffer::{Buffer, BufferId, Decoration, StyledText};
+use crate::buffer::{Buffer, BufferId, Decoration, Place, StyledText};
 use crate::commands::motion;
 use crate::editor::Editor;
 use crate::face::FaceId;
@@ -164,20 +164,25 @@ impl RowText {
     }
 
     /// Makes this buffer `id`'s text (faces in decoration layer `layer`) and rows, keeping
-    /// each window on the item it was on (else on the same line) and marks on their items.
-    /// For re-renders of the same content: a refresh, an expanded section.
+    /// each window, and the place the buffer is shown at next, on the item it was on (else
+    /// on the same line) and marks on their items. For re-renders of the same content: a
+    /// refresh, an expanded section.
     pub fn install(self, ed: &mut Editor, id: BufferId, layer: &str) {
         let buf = &ed.buffers[id];
         let old = buf.local::<Rows>();
+        let place = buf.place();
+        // Each window's point, then (no window) the buffer's place.
         let anchors: Vec<_> = ed
             .layout
             .views()
             .into_iter()
             .filter(|v| v.buffer == id)
-            .map(|v| {
-                let line = buf.char_to_line(v.cursor.pos);
+            .map(|v| (Some(v.id()), v.cursor.pos))
+            .chain([(None, place.pos)])
+            .map(|(view, pos)| {
+                let line = buf.char_to_line(pos);
                 let key = old.and_then(|rows| Some(rows.rows[rows.at_line(line)?].spec.key));
-                (v.id(), key, line)
+                (view, key, line)
             })
             .collect();
 
@@ -191,16 +196,28 @@ impl RowText {
 
         let buf = &ed.buffers[id];
         let rows = buf.local::<Rows>().expect("installed above");
-        for (view, key, line) in anchors {
-            let row = key.and_then(|key| rows.rows.iter().position(|r| r.spec.key == key));
-            let line = line.min(buf.len_lines() - 1);
-            let pos = match row.or_else(|| rows.at_line(line)) {
-                Some(row) => rows.point(buf, row),
-                None => buf.line_to_char(line),
-            };
-            if let Some(view) = ed.layout.view_mut(view) {
-                view.goto(pos);
-                view.clamp(buf.len_chars(), buf.len_lines());
+        let (len_chars, len_lines) = (buf.len_chars(), buf.len_lines());
+        let moved: Vec<_> = anchors
+            .into_iter()
+            .map(|(view, key, line)| {
+                let row = key.and_then(|key| rows.rows.iter().position(|r| r.spec.key == key));
+                let line = line.min(len_lines - 1);
+                let pos = match row.or_else(|| rows.at_line(line)) {
+                    Some(row) => rows.point(buf, row),
+                    None => buf.line_to_char(line),
+                };
+                (view, pos)
+            })
+            .collect();
+        for (view, pos) in moved {
+            match view {
+                Some(view) => {
+                    if let Some(view) = ed.layout.view_mut(view) {
+                        view.goto(pos);
+                        view.clamp(len_chars, len_lines);
+                    }
+                }
+                None => ed.buffers[id].set_place(Place { pos, mark: None, top_line: place.top_line }),
             }
         }
     }
@@ -217,6 +234,7 @@ impl RowText {
         let buf = &ed.buffers[id];
         let rows = buf.local::<Rows>().expect("installed above");
         let pos = rows.step(None, true).map_or(0, |row| rows.point(buf, row));
+        ed.buffers[id].set_place(Place { pos, ..Place::default() });
         for view in ed.layout.views_showing(id) {
             view.reset();
             view.goto(pos);

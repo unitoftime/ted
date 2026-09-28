@@ -108,8 +108,8 @@ impl Doc<'_> {
             let dl = &sl.layout;
             let is_current = line == cur_line;
             let whole_line_face = line_face.as_ref().and_then(|f| match content.as_str() {
-                Some(text) => f(text),
-                None => f(&content.to_string()),
+                Some(text) => f(line, text),
+                None => f(line, &content.to_string()),
             });
 
             // Columns of a char range clipped to this line; running past the end covers the newline.

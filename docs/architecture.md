@@ -20,8 +20,8 @@ ted_gui ──┼──> ted_lsp ──┼──> ted_core
 
 | Concept | What it is |
 |---|---|
-| Buffer | Text (a rope), its file, mode, undo tree and syntax tree. Plain data, addressed by `BufferId`. |
-| View | A window onto a buffer: cursor, scroll, wrapping. Views are the leaves of the split `Layout`. |
+| Buffer | Text (a rope), its file, mode, undo tree and syntax tree, and the `Place` the last view to leave it was at. Plain data, addressed by `BufferId`. |
+| View | A window onto a buffer: cursor, scroll, wrapping. Showing a buffer starts at its place. Views are the leaves of the split `Layout`. |
 | Doc | A view and its buffer borrowed together. Motion and editing primitives live here. |
 | Command | Every user-facing action is a named command, whether built in or from a plugin. |
 | Keymap | A trie of key sequences to commands. Keymaps have parents and stack in layers. |

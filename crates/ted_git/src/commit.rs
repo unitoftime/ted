@@ -1,8 +1,11 @@
 //! Writing commit messages in a buffer: `C-c C-c` commits, `C-c C-k` cancels.
+//!
+//! The message is highlighted as Markdown, with the summary line standing out and the
+//! `#` lines git ignores drawn as comments.
 
 use std::path::PathBuf;
 
-use ted_core::Editor;
+use ted_core::{Editor, FaceId, Mode};
 
 use crate::git::args;
 use crate::{process, status};
@@ -11,6 +14,16 @@ pub const MODE: &str = "Git Commit";
 pub const BUFFER: &str = "COMMIT_EDITMSG";
 const HELP: &str =
     "# Write the commit message above. Lines starting with '#' are ignored.\n# C-c C-c to commit, C-c C-k to cancel.\n";
+
+pub fn mode() -> Mode {
+    Mode::new(MODE).comment("# ").grammar(ted_core::syntax::markdown).line_face(|line, text| {
+        if text.starts_with('#') {
+            Some(FaceId::COMMENT)
+        } else {
+            (line == 0).then_some(FaceId::HEADING)
+        }
+    })
+}
 
 /// Buffer-local marker: this buffer's message amends the last commit.
 #[derive(Default)]
