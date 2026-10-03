@@ -70,7 +70,9 @@ fn main() {
             // Wayland app_id and X11 WM_CLASS (winit shares the field): must match ted.desktop so
             // launchers and docks associate the window with the installed entry and its icon.
             .with_name("ted", "ted")
+            // The size it restores to when unmaximized.
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
+            .with_maximized(true)
             .build(&event_loop)
             .expect("Failed to create window"),
     );
