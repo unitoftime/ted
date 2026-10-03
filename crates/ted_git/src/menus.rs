@@ -1,4 +1,4 @@
-//! Menus for commit, push, pull, fetch, branch and stash operations.
+//! Menus for commit, push, pull, fetch, branch, stash and reset operations.
 
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,7 @@ use ted_core::{Editor, Menu, PickerItem};
 
 use crate::git::{args, git, git_output};
 use crate::diff::{self, Source};
-use crate::{commit, model, process, status};
+use crate::{commit, log, model, process, status};
 
 fn run(root: &Path, list: &'static [&'static str], done: &'static str) -> impl FnOnce(&mut Editor) {
     let root = root.to_path_buf();
@@ -102,6 +102,43 @@ pub fn stash(ed: &mut Editor, root: PathBuf) {
         .entry('p', "Pop", move |ed| with_stash(ed, r5, "Pop", |ed, root, name| use_stash(ed, root, "pop", name)))
         .entry('k', "Drop", move |ed| with_stash(ed, r6, "Drop", drop_stash));
     ed.push_modal(menu);
+}
+
+pub fn reset(ed: &mut Editor, root: PathBuf) {
+    let entry = |mode: &'static str| {
+        let root = root.clone();
+        move |ed: &mut Editor| reset_to(ed, root, mode)
+    };
+    let menu = Menu::new("git-reset", "Reset")
+        .group("Reset HEAD to a commit")
+        .entry('m', "Mixed (keep worktree, reset index)", entry("mixed"))
+        .entry('s', "Soft (keep worktree and index)", entry("soft"))
+        .entry('k', "Keep (keep uncommitted changes)", entry("keep"))
+        .entry('h', "Hard (discard all changes)", entry("hard"));
+    ed.push_modal(menu);
+}
+
+/// Resets HEAD to a prompted commit, defaulting to the one at point, with `git reset
+/// --<mode>`. A hard reset asks first, since it discards uncommitted changes.
+fn reset_to(ed: &mut Editor, root: PathBuf, mode: &'static str) {
+    let initial = status::commit_at_point(ed).or_else(|| log::commit_at_point(ed)).unwrap_or_else(|| "HEAD".into());
+    ed.prompt("git-reset", format!("Reset ({}) to: ", mode), initial, move |ed, target| {
+        if target.is_empty() {
+            return;
+        }
+        let label = format!("Hard reset to {}, discarding all uncommitted changes? (y/n) ", target);
+        let run = move |ed: &mut Editor| {
+            let done = format!("Reset to {}", target);
+            process::run(ed, root, args(&["reset", &format!("--{}", mode), &target]), None, &done, |_| {});
+        };
+        if mode != "hard" {
+            return run(ed);
+        }
+        ed.confirm("git-reset-hard", label, move |ed, yes| match yes {
+            true => run(ed),
+            false => ed.set_status("Reset cancelled"),
+        });
+    });
 }
 
 /// Which changes to tracked files a stash takes.

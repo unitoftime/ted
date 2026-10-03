@@ -36,12 +36,16 @@ pub fn open(ed: &mut Editor, root: PathBuf) {
     });
 }
 
+/// The commit on the current line, if the active buffer is a log buffer.
+pub fn commit_at_point(ed: &Editor) -> Option<String> {
+    let log = ed.active_buffer().local::<LogBuffer>()?;
+    log.hashes.get(rows::at_point(ed)?).cloned()
+}
+
 /// RET in the log: shows the commit on the current line.
 pub fn visit(ed: &mut Editor) {
-    let buf = ed.active_buffer();
-    let hash = buf.local::<LogBuffer>().zip(rows::at_point(ed)).and_then(|(log, row)| log.hashes.get(row).cloned());
-    let root = buf.directory();
-    if let Some(hash) = hash {
+    if let Some(hash) = commit_at_point(ed) {
+        let root = ed.active_buffer().directory();
         diff::show(ed, root, diff::Source::Commit(hash));
     }
 }

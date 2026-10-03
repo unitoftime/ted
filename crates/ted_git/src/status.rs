@@ -317,6 +317,12 @@ pub fn stash_at_point(ed: &mut Editor) -> Option<String> {
     Some(status_of(ed)?.stashes.get(i)?.name.clone())
 }
 
+/// The commit on the current line, if the active buffer is a status buffer showing one.
+pub fn commit_at_point(ed: &Editor) -> Option<String> {
+    let (_, Item::Commit(c)) = at_point(ed)? else { return None };
+    Some(status_of(ed)?.recent.get(c)?.hash.clone())
+}
+
 /// Whether the status at point has anything staged.
 pub fn has_staged(ed: &Editor) -> bool {
     status_of(ed).is_some_and(|s| !s.staged.is_empty())

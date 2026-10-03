@@ -10,7 +10,7 @@
 //! | `s` / `u` | stage/unstage the section, file or hunk at point |
 //! | `S` / `U` | stage all tracked changes / unstage everything |
 //! | `k` | discard the untracked file or directory, or unstaged change, at point |
-//! | `c` `P` `F` `f` `b` `d` `z` | commit, push, pull, fetch, branch, diff and stash menus |
+//! | `c` `P` `F` `f` `b` `d` `z` `x` | commit, push, pull, fetch, branch, diff, stash and reset menus |
 //! | `l` | log; RET shows a commit |
 //! | `h` / `?` | popup of the commands available here (runs them too) |
 //! | `$` | the git process log |
@@ -164,6 +164,7 @@ impl Plugin for GitPlugin {
         repo_command(ed, "git-log", "Show the log of the current branch", log::open);
         repo_command(ed, "git-diff", "Diff menu", menus::diff);
         repo_command(ed, "git-stash", "Stash menu", menus::stash);
+        repo_command(ed, "git-reset", "Reset menu", menus::reset);
         repo_command(ed, "git-stage-all", "Stage all changes to tracked files", |ed, root| {
             process::run(ed, root, args(&["add", "-u"]), None, "Staged all", |_| {})
         });
@@ -205,6 +206,7 @@ impl Plugin for GitPlugin {
                         "git-pull",
                         "git-push",
                         "git-stash",
+                        "git-reset",
                         "git-log",
                     ],
                 )
@@ -237,12 +239,14 @@ impl Plugin for GitPlugin {
                     ("l", "git-log"),
                     ("d", "git-diff"),
                     ("z", "git-stash"),
+                    ("x", "git-reset"),
                     ("$", "git-process"),
                 ]),
         );
         ed.define_mode(Mode::new(log::MODE).special().revert("git-log").keys(&[
             ("RET", "git-log-visit"),
             ("d", "git-diff"),
+            ("x", "git-reset"),
             ("$", "git-process"),
         ]));
         ed.define_mode(Mode::new(diff::MODE).special().revert("git-diff-refresh").keys(&[
