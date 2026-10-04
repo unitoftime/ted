@@ -1,12 +1,11 @@
 # ted
+Ted is a text editor similar to emacs, targeting better performance and less cruft.
 
 ## Motivation
 I love emacs, and have used it for a very long time, but emacs has a few problems that really bother me: Its slow and bulky, lags on LSP, lisp is slow and hard to configure, bloated hotkeys. I don't say these things to take away from what emacs is, or what other people have created, but I decided it was time for me to move on. So I decided to vibe-code my own editor. Anyways, here it is.
 
-## What is it?
-A fast, Emacs-flavored text editor written in Rust. It keeps the Emacs keys and the
-"everything is a command" model, drops the Lisp, and builds in the tools you would
-otherwise assemble from packages.
+## Current State
+Ted currently is mostly just built for me. I'm actively using it instead of emacs, but it there are definitely still some gaps that I'm working through, and that I'm fixing along the way. I've only tested it on linux. You're welcome to use it if you want. For contributing: if you run into a bug or want some feature, feel free to file an issue and I'll decide if if I want to add it; however, I likely won't review any pull requests.
 
 ## Features
 
