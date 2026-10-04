@@ -66,7 +66,7 @@ pub fn push(ed: &mut Editor, root: PathBuf) {
 pub fn pull(ed: &mut Editor, root: PathBuf) {
     let menu = Menu::new("git-pull", "Pull")
         .group("Pull")
-        .entry('p', "Pull from upstream", run(&root, &["pull"], "Pulled"))
+        .entry('u', "Pull from upstream", run(&root, &["pull"], "Pulled"))
         .entry('r', "Pull with rebase", run(&root, &["pull", "--rebase"], "Pulled"));
     ed.push_modal(menu);
 }
