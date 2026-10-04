@@ -56,8 +56,8 @@ pub fn diff(ed: &mut Editor, root: PathBuf) {
 pub fn push(ed: &mut Editor, root: PathBuf) {
     let menu = Menu::new("git-push", "Push")
         .group("Push")
-        .entry('p', "Push to upstream", run(&root, &["push"], "Pushed"))
-        .entry('u', "Push and set upstream", run(&root, &["push", "-u", "origin", "HEAD"], "Pushed"))
+        .entry('u', "Push to upstream", run(&root, &["push"], "Pushed"))
+        .entry('s', "Push and set upstream", run(&root, &["push", "-u", "origin", "HEAD"], "Pushed"))
         .group("Force")
         .entry('f', "Force push (with lease)", run(&root, &["push", "--force-with-lease"], "Force pushed"));
     ed.push_modal(menu);
