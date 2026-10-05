@@ -5,8 +5,14 @@ use std::path::Path;
 
 use ted_core::process::{Output, Program};
 
+/// `git <args>` in `root`. Queries are kept from taking the index lock to save refreshed
+/// stat info as they go (`git status` and `git diff` would), since they run in the
+/// background while the next command may be one that needs the lock.
 fn program(root: &Path, args: &[String]) -> Program {
-    Program::new("git", root).args(["-c", "core.quotepath=false", "-c", "color.ui=false"]).args(args.iter().cloned())
+    Program::new("git", root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "diff.autoRefreshIndex=false"])
+        .args(args.iter().cloned())
 }
 
 /// Runs `git <args>` in `root`, feeding `stdin` if given.
