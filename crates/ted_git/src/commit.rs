@@ -1,7 +1,7 @@
 //! Writing commit messages in a buffer: `C-c C-c` commits, `C-c C-k` cancels.
 //!
-//! The message is highlighted as Markdown, with the summary line standing out and the
-//! `#` lines git ignores drawn as comments.
+//! The message is highlighted as Markdown, with the `#` lines git ignores drawn as
+//! comments.
 
 use std::path::PathBuf;
 
@@ -19,15 +19,7 @@ pub fn mode() -> Mode {
     Mode::new(MODE)
         .comment("# ")
         .grammar(ted_core::syntax::markdown)
-        .line_face(
-            |line, text| {
-                if text.starts_with('#') {
-                    Some(FaceId::COMMENT)
-                } else {
-                    (line == 0).then_some(FaceId::HEADING)
-                }
-            },
-        )
+        .line_face(|_, text| text.starts_with('#').then_some(FaceId::COMMENT))
         .keys(&[("C-c C-c", "git-commit-finish"), ("C-c C-k", "git-commit-cancel")])
 }
 
