@@ -1,12 +1,13 @@
 //! Diffs as rows, shared by the status buffer's unstaged and staged sections and by diff
-//! buffers: a heading per file (its kind, path and line counts; a renamed file's path as
-//! `old → new`) with its hunks under it, and what the keys at point do to them: visit the
-//! line, stage, unstage or discard.
+//! buffers: a heading per file (its kind, path and line counts, or a binary file's sizes; a
+//! renamed file's path as `old → new`) with its hunks under it, and what the keys at point
+//! do to them: visit the line, stage, unstage or discard.
 
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 use ted_core::rows::RowSpec;
+use ted_core::text::human_size;
 use ted_core::{Editor, FaceId};
 
 use crate::git::args;
@@ -67,17 +68,22 @@ pub fn write(
 ) {
     for (f, file) in files.iter().enumerate() {
         let kind = format!("{:<11}", file.kind);
+        let note = note(file);
         let (added, removed) = (format!("  +{}", file.added), format!(" -{}", file.removed));
         let heading = Some(faces.file_heading);
         let mut parts = vec![(kind.as_str(), None)];
         if let Some(from) = &file.from {
             parts.extend([(from.as_str(), heading), (" → ", None)]);
         }
-        parts.extend([
-            (file.path.as_str(), heading),
-            (added.as_str(), Some(faces.count_added)),
-            (removed.as_str(), Some(faces.count_removed)),
-        ]);
+        parts.push((file.path.as_str(), heading));
+        if !note.is_empty() {
+            parts.push((note.as_str(), Some(faces.file_note)));
+        }
+        // Only hunks have lines to count: a binary file, a rename or a change of
+        // permissions alone has none.
+        if !file.hunks.is_empty() {
+            parts.extend([(added.as_str(), Some(faces.count_added)), (removed.as_str(), Some(faces.count_removed))]);
+        }
         row(Line::File(f), &parts);
         if !open(Line::File(f)) {
             continue;
@@ -92,6 +98,24 @@ pub fn write(
             }
         }
     }
+}
+
+/// What a file's heading says of its change besides line counts: new permissions, and
+/// for a binary file its size before and after (the one size of a new or deleted file).
+fn note(file: &FileDiff) -> String {
+    let mut note = String::new();
+    if let Some((old, new)) = file.mode {
+        note.push_str(&format!("  mode {:o} → {:o}", old, new));
+    }
+    if let Some(binary) = file.binary {
+        note.push_str("  binary");
+        match (binary.old.map(human_size), binary.new.map(human_size)) {
+            (Some(old), Some(new)) => note.push_str(&format!(" {} → {}", old, new)),
+            (Some(size), None) | (None, Some(size)) => note.push_str(&format!(" {}", size)),
+            (None, None) => {}
+        }
+    }
+    note
 }
 
 /// The row for `line` of `files` (listed under `group`, e.g. a status section), keyed by

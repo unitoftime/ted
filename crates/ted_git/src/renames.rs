@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::git::{args, git, git_with_index};
-use crate::model::{parse_diff, FileDiff};
+use crate::model::{measure_binaries, parse_diff, FileDiff};
 
 /// A copy of the repository's index for git to change, leaving the real one as it is.
 struct ScratchIndex(PathBuf);
@@ -46,14 +46,22 @@ pub fn worktree_diff(
     untracked: Option<&mut Vec<String>>,
 ) -> Result<Vec<FileDiff>, String> {
     let mut files = parse_diff(&git(root, diff, None)?);
+    pair_renames(root, diff, &mut files, untracked);
+    measure_binaries(root, &mut files);
+    Ok(files)
+}
+
+/// Replaces the deletions in `files` (those of `diff`) that untracked files turn out to
+/// be renames of with those renames, and takes their new paths out of `untracked`.
+fn pair_renames(root: &Path, diff: &[String], files: &mut Vec<FileDiff>, untracked: Option<&mut Vec<String>>) {
     let nothing_untracked = untracked.as_ref().is_some_and(|paths| paths.is_empty());
     if nothing_untracked || !files.iter().any(|f| f.kind == "deleted") {
-        return Ok(files);
+        return;
     }
     // A refinement of the diff: if it fails, the deletions are shown as git reports them.
-    let Ok((renames, others)) = detect(root, diff) else { return Ok(files) };
+    let Ok((renames, others)) = detect(root, diff) else { return };
     if renames.is_empty() {
-        return Ok(files);
+        return;
     }
     let from: HashSet<&str> = renames.iter().filter_map(|f| f.from.as_deref()).collect();
     files.retain(|f| !from.contains(f.path.as_str()));
@@ -71,7 +79,6 @@ pub fn worktree_diff(
     }
     files.extend(renames);
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(files)
 }
 
 /// The renames `diff` shows once every untracked file counts as added, and those files

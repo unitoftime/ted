@@ -12,8 +12,8 @@ use ted_core::rows::{self, RowText};
 use ted_core::{BufferId, BufferScope, Editor, FaceId};
 
 use crate::changes::{self, Action, Fold, Line};
-use crate::git::{args, git};
-use crate::model::{self, diff_args, CommitDetails, FileDiff, Section};
+use crate::git::git;
+use crate::model::{self, diff_args, patch_args, CommitDetails, FileDiff, Section};
 use crate::renames;
 use crate::status::{self, Item};
 use crate::{generated_buffer, GitFaces};
@@ -56,8 +56,8 @@ impl Source {
             Source::File(Section::Staged, paths) => file(&["--cached", "--"], paths),
             Source::File(_, paths) => file(&["--"], paths),
             Source::Range(range) => diff_args(&[range]),
-            Source::Commit(rev) => args(&["show", "--format=", "--no-ext-diff", "--diff-merges=first-parent", rev]),
-            Source::Stash(name) => args(&["stash", "show", "-p", "--no-ext-diff", name]),
+            Source::Commit(rev) => patch_args(&["show", "--format=", "--diff-merges=first-parent"], &[rev]),
+            Source::Stash(name) => patch_args(&["stash", "show", "-p"], &[name]),
         }
     }
 
@@ -69,7 +69,7 @@ impl Source {
             Source::Unstaged | Source::Worktree | Source::File(Section::Unstaged, _) => {
                 renames::worktree_diff(root, &args, None)
             }
-            _ => git(root, &args, None).map(|diff| model::parse_diff(&diff)),
+            _ => model::load_diff(root, &args),
         }
     }
 

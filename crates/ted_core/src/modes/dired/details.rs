@@ -11,6 +11,8 @@ use std::fs::DirEntry;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::text::human_size;
+
 /// An entry's metadata, as `lstat` reports it (a symlink's own, not its target's).
 #[derive(Debug, Clone)]
 pub struct Details {
@@ -142,29 +144,6 @@ fn permissions(mode: u32) -> String {
         }
     }
     out.iter().collect()
-}
-
-/// `size` as `ls -h` shows it: bytes below 1K, then one decimal below 10 of a unit (`4.0K`)
-/// and whole units above (`12K`), rounded up.
-fn human_size(size: u64) -> String {
-    const UNITS: [char; 6] = ['K', 'M', 'G', 'T', 'P', 'E'];
-    if size < 1024 {
-        return size.to_string();
-    }
-    let mut value = size as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    let tenths = (value * 10.0).ceil() as u64;
-    if tenths < 100 {
-        return format!("{}.{}{}", tenths / 10, tenths % 10, UNITS[unit]);
-    }
-    match value.ceil() as u64 {
-        1024 if unit + 1 < UNITS.len() => format!("1.0{}", UNITS[unit + 1]),
-        whole => format!("{}{}", whole, UNITS[unit]),
-    }
 }
 
 struct LocalTime {

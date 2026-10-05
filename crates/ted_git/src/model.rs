@@ -205,6 +205,18 @@ pub struct FileDiff {
     /// Lines added and removed across the hunks.
     pub added: usize,
     pub removed: usize,
+    /// Set for a file git diffs as binary, which has no hunks.
+    pub binary: Option<Binary>,
+    /// The file's permissions before and after, when the change alters them.
+    pub mode: Option<(u32, u32)>,
+}
+
+/// A binary file's size in bytes on each side of a change: `None` where there is no file
+/// (it is new or deleted), or the size is not known.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Binary {
+    pub old: Option<u64>,
+    pub new: Option<u64>,
 }
 
 impl FileDiff {
@@ -272,7 +284,7 @@ pub fn load(root: &Path) -> Result<Status, String> {
         head.merging = load_merge(root, &git_dir);
     }
     let unstaged = renames::worktree_diff(root, &diff_args(&[]), Some(&mut untracked))?;
-    let staged = parse_diff(&git(root, &diff_args(&["--cached"]), None)?);
+    let staged = load_diff(root, &diff_args(&["--cached"]))?;
     // These fail in a repository without commits; that just means no history.
     let stashes = parse_stashes(&git(root, &stash_list_args(), None).unwrap_or_default());
     let recent = parse_log(&git(root, &log_args(10), None).unwrap_or_default());
@@ -323,7 +335,54 @@ fn branch_at(root: &Path, commit: &str) -> Option<String> {
 /// `git diff` arguments for `spec`: what to compare (`--cached`, a revision) and any
 /// `-- <paths>` to limit it to.
 pub fn diff_args(spec: &[&str]) -> Vec<String> {
-    args(&[&["diff", "--no-ext-diff"], spec].concat())
+    patch_args(&["diff"], spec)
+}
+
+/// Arguments for `command` to print the patch of `spec` as `parse_diff` reads it. Blob
+/// ids are in full, so that one names its object whatever else the repository holds.
+pub fn patch_args(command: &[&str], spec: &[&str]) -> Vec<String> {
+    args(&[command, &["--no-ext-diff", "--full-index"], spec].concat())
+}
+
+/// The files the diff `args` print changes. Runs git; call from a job.
+pub fn load_diff(root: &Path, args: &[String]) -> Result<Vec<FileDiff>, String> {
+    let mut files = parse_diff(&git(root, args, None)?);
+    measure_binaries(root, &mut files);
+    Ok(files)
+}
+
+/// Fills in the sizes of the binary files in `files`, which a diff leaves out. Git knows
+/// those of its objects; a side that is a file in the working tree at `root` is not one,
+/// and is measured there. Runs git once, and only when there is a binary file.
+pub fn measure_binaries(root: &Path, files: &mut [FileDiff]) {
+    let mut ids = String::new();
+    let mut binaries = Vec::new();
+    for file in files.iter_mut().filter(|f| f.binary.is_some()) {
+        let Some((old, new)) = blob_ids(&file.header) else { continue };
+        ids.extend([old, "\n", new, "\n"]);
+        binaries.push(file);
+    }
+    if binaries.is_empty() {
+        return;
+    }
+    let Ok(sizes) = git(root, &args(&["cat-file", "--batch-check=%(objectsize)"]), Some(&ids)) else { return };
+    // An id git has no object for gets a line that is not a size.
+    let mut sizes = ids.lines().zip(sizes.lines()).map(|(id, size)| (id, size.parse::<u64>().ok()));
+    for file in binaries {
+        let (Some((_, old)), Some((id, new))) = (sizes.next(), sizes.next()) else { break };
+        let new = match new {
+            // All zeros stands for no file; any other id is the working tree file's.
+            None if id.bytes().any(|b| b != b'0') => std::fs::metadata(root.join(&file.path)).ok().map(|m| m.len()),
+            size => size,
+        };
+        file.binary = Some(Binary { old, new });
+    }
+}
+
+/// The blobs a file's change is between, from its `index <old>..<new>` header line.
+fn blob_ids(header: &[String]) -> Option<(&str, &str)> {
+    let ids = header.iter().find_map(|l| l.strip_prefix("index "))?;
+    ids.split(' ').next()?.split_once("..")
 }
 
 /// Branch info and untracked paths from `git status --porcelain=v2 --branch -z`.
@@ -364,7 +423,8 @@ pub fn parse_diff(output: &str) -> Vec<FileDiff> {
             let kind = if line.starts_with("diff --cc ") { "unmerged" } else { "modified" };
             let header = vec![line.to_string()];
             let (path, from) = (String::new(), None);
-            files.push(FileDiff { path, from, kind, header, hunks: Vec::new(), added: 0, removed: 0 });
+            let (hunks, binary, mode) = (Vec::new(), None, None);
+            files.push(FileDiff { path, from, kind, header, hunks, added: 0, removed: 0, binary, mode });
             continue;
         }
         let Some(file) = files.last_mut() else { continue };
@@ -387,8 +447,21 @@ pub fn parse_diff(output: &str) -> Vec<FileDiff> {
         if file.kind == "modified" {
             file.kind = kind_of(&file.header);
         }
+        let is_binary = file.header.iter().any(|l| l.starts_with("Binary files "));
+        file.binary = is_binary.then(Binary::default);
+        file.mode = mode_change(&file.header);
     }
     files
+}
+
+/// The permissions a change takes a file from and to, from its `old mode` and `new mode`
+/// header lines.
+fn mode_change(header: &[String]) -> Option<(u32, u32)> {
+    let permissions = |prefix: &str| {
+        let mode = header.iter().find_map(|l| l.strip_prefix(prefix))?;
+        Some(u32::from_str_radix(mode, 8).ok()? & 0o7777)
+    };
+    Some((permissions("old mode ")?, permissions("new mode ")?))
 }
 
 fn path_of(header: &[String]) -> String {
