@@ -1,4 +1,4 @@
-//! Menus for commit, push, pull, fetch, branch, merge, rebase, stash and reset operations.
+//! Menus for commit, push, pull, fetch, branch, tag, merge, rebase, stash and reset operations.
 
 use std::path::{Path, PathBuf};
 
@@ -54,10 +54,14 @@ pub fn diff(ed: &mut Editor, root: PathBuf) {
 }
 
 pub fn push(ed: &mut Editor, root: PathBuf) {
+    let tag_root = root.clone();
     let menu = Menu::new("git-push", "Push")
         .group("Push")
         .entry('u', "Push to upstream", run(&root, &["push"], "Pushed"))
         .entry('s', "Push and set upstream", run(&root, &["push", "-u", "origin", "HEAD"], "Pushed"))
+        .group("Tags")
+        .entry('t', "Push a tag to origin", move |ed| push_tag(ed, tag_root))
+        .entry('T', "Push all tags", run(&root, &["push", "--tags"], "Pushed all tags"))
         .group("Force")
         .entry('f', "Force push (with lease)", run(&root, &["push", "--force-with-lease"], "Force pushed"));
     ed.push_modal(menu);
@@ -86,7 +90,22 @@ pub fn branch(ed: &mut Editor, root: PathBuf) {
         .entry('b', "Checkout branch", move |ed| checkout(ed, r1))
         .entry('c', "Create and checkout", move |ed| create(ed, r2))
         .group("Delete")
-        .entry('k', "Delete branch", move |ed| delete(ed, r3));
+        .entry('k', "Delete branch", move |ed| delete(ed, r3, "branch", &["refs/heads"]));
+    ed.push_modal(menu);
+}
+
+pub fn tag(ed: &mut Editor, root: PathBuf) {
+    let create = |annotated: bool| {
+        let root = root.clone();
+        move |ed: &mut Editor| tag_commit(ed, root, annotated)
+    };
+    let delete_root = root.clone();
+    let menu = Menu::new("git-tag", "Tag")
+        .group("Tag the commit at point, else HEAD")
+        .entry('t', "Lightweight", create(false))
+        .entry('a', "Annotated (with a message)", create(true))
+        .group("Delete")
+        .entry('k', "Delete tag", move |ed| delete(ed, delete_root, "tag", &["refs/tags"]));
     ed.push_modal(menu);
 }
 
@@ -147,10 +166,15 @@ pub fn reset(ed: &mut Editor, root: PathBuf) {
     ed.push_modal(menu);
 }
 
+/// The commit at point in a status or log buffer, else HEAD.
+fn commit_at_point(ed: &Editor) -> String {
+    status::commit_at_point(ed).or_else(|| log::commit_at_point(ed)).unwrap_or_else(|| "HEAD".into())
+}
+
 /// Resets HEAD to a prompted commit, defaulting to the one at point, with `git reset
 /// --<mode>`. A hard reset asks first, since it discards uncommitted changes.
 fn reset_to(ed: &mut Editor, root: PathBuf, mode: &'static str) {
-    let initial = status::commit_at_point(ed).or_else(|| log::commit_at_point(ed)).unwrap_or_else(|| "HEAD".into());
+    let initial = commit_at_point(ed);
     ed.prompt("git-reset", format!("Reset ({}) to: ", mode), initial, move |ed, target| {
         if target.is_empty() {
             return;
@@ -269,31 +293,28 @@ fn with_stash(
     });
 }
 
-/// Picks a local branch, or with `remotes` a remote-tracking one too (not `*/HEAD`), and
-/// passes its full ref name to `then`.
-fn pick_branch(
+/// Picks a ref under `namespaces` (`refs/heads`, `refs/remotes` without its `*/HEAD`s,
+/// `refs/tags`) and passes its full name to `then`.
+fn pick_ref(
     ed: &mut Editor,
     root: PathBuf,
-    id: &'static str,
-    title: &'static str,
-    remotes: bool,
+    id: impl Into<String>,
+    title: impl Into<String>,
+    namespaces: &[&str],
     then: impl FnOnce(&mut Editor, PathBuf, String) + Send + 'static,
 ) {
-    let mut list = args(&["for-each-ref", "--format=%(refname)", "refs/heads"]);
-    if remotes {
-        list.push("refs/remotes".into());
-    }
+    let (id, title) = (id.into(), title.into());
+    let list = args(&[&["for-each-ref", "--format=%(refname)"], namespaces].concat());
     let r = root.clone();
     process::query(ed, root, list, move |ed, out| {
         let refs: Vec<String> = out.lines().filter(|l| !l.ends_with("/HEAD")).map(str::to_string).collect();
-        let kind = |full: &str| if full.starts_with("refs/remotes/") { "remote" } else { "local" };
-        let items = refs.iter().map(|full| PickerItem::new(short_name(full), kind(full))).collect();
-        ed.pick(id, title, items, move |ed, index| then(ed, r, refs[index].clone()));
+        let items = refs.iter().map(|full| split_ref(full)).map(|(name, kind)| PickerItem::new(name, kind)).collect();
+        ed.pick(&id, title, items, move |ed, index| then(ed, r, refs[index].clone()));
     });
 }
 
 fn checkout(ed: &mut Editor, root: PathBuf) {
-    pick_branch(ed, root, "git-checkout", "Checkout branch", true, |ed, root, full| {
+    pick_ref(ed, root, "git-checkout", "Checkout branch", BRANCHES, |ed, root, full| {
         // For a remote branch, checking out its local name creates a tracking branch.
         let target = match full.strip_prefix("refs/remotes/") {
             Some(remote) => remote.split_once('/').map_or(remote, |(_, name)| name),
@@ -314,21 +335,58 @@ fn create(ed: &mut Editor, root: PathBuf) {
     });
 }
 
-fn delete(ed: &mut Editor, root: PathBuf) {
-    pick_branch(ed, root, "git-branch-delete", "Delete branch", false, |ed, root, full| {
+/// Deletes a picked ref under `namespaces` after confirmation. `kind` (`branch` or `tag`)
+/// is what it is called, and the git command that deletes it.
+fn delete(ed: &mut Editor, root: PathBuf, kind: &'static str, namespaces: &[&str]) {
+    let id = format!("git-{}-delete", kind);
+    pick_ref(ed, root, id.clone(), format!("Delete {}", kind), namespaces, move |ed, root, full| {
         let name = short_name(&full).to_string();
-        ed.confirm("git-branch-delete", format!("Delete branch {}? (y/n) ", name), move |ed, yes| {
+        ed.confirm(&id, format!("Delete {} {}? (y/n) ", kind, name), move |ed, yes| {
             if yes {
                 let done = format!("Deleted {}", name);
-                process::run(ed, root, args(&["branch", "-d", &name]), None, &done, |_| {});
+                let log_root = root.clone();
+                process::run(ed, root, args(&[kind, "-d", &name]), None, &done, move |ed| log::refresh(ed, &log_root));
             }
+        });
+    });
+}
+
+/// Pushes a picked tag to `origin`.
+fn push_tag(ed: &mut Editor, root: PathBuf) {
+    pick_ref(ed, root, "git-push-tag", "Push tag", &["refs/tags"], |ed, root, full| {
+        let done = format!("Pushed {}", short_name(&full));
+        process::run(ed, root, args(&["push", "origin", &full]), None, &done, |_| {});
+    });
+}
+
+/// Tags the commit at point, else HEAD, under a prompted name. An annotated tag is an
+/// object of its own, with a message that is prompted for too.
+fn tag_commit(ed: &mut Editor, root: PathBuf, annotated: bool) {
+    let commit = commit_at_point(ed);
+    ed.prompt("git-tag-name", format!("Tag {} as: ", commit), "", move |ed, name| {
+        if name.is_empty() {
+            return;
+        }
+        let label = format!("Message for {}: ", name);
+        let tag = move |ed: &mut Editor, options: &[&str]| {
+            let done = format!("Tagged {} as {}", commit, name);
+            let tag_args = args(&[&["tag"], options, &[name.as_str(), commit.as_str()]].concat());
+            let log_root = root.clone();
+            process::run(ed, root, tag_args, None, &done, move |ed| log::refresh(ed, &log_root));
+        };
+        if !annotated {
+            return tag(ed, &[]);
+        }
+        ed.prompt("git-tag-message", label, "", move |ed, message| match message.is_empty() {
+            true => ed.set_status("An annotated tag needs a message"),
+            false => tag(ed, &["-a", "-m", &message]),
         });
     });
 }
 
 /// Merges a picked branch into the current one with `git merge <options>`.
 fn merge_branch(ed: &mut Editor, root: PathBuf, options: &'static [&'static str]) {
-    pick_branch(ed, root, "git-merge-branch", "Merge", true, move |ed, root, full| {
+    pick_ref(ed, root, "git-merge-branch", "Merge", BRANCHES, move |ed, root, full| {
         let branch = short_name(&full);
         let done = format!("Merged {}", branch);
         process::run(ed, root, args(&[&["merge"], options, &[branch]].concat()), None, &done, |_| {});
@@ -337,7 +395,7 @@ fn merge_branch(ed: &mut Editor, root: PathBuf, options: &'static [&'static str]
 
 /// Rebases the current branch onto a picked one.
 fn rebase_onto(ed: &mut Editor, root: PathBuf) {
-    pick_branch(ed, root, "git-rebase-onto", "Rebase onto", true, |ed, root, full| {
+    pick_ref(ed, root, "git-rebase-onto", "Rebase onto", BRANCHES, |ed, root, full| {
         let onto = short_name(&full);
         let done = format!("Rebased onto {}", onto);
         process::run(ed, root, args(&["rebase", onto]), None, &done, |_| {});
@@ -357,6 +415,15 @@ fn abort(ed: &mut Editor, root: PathBuf, operation: &'static str) {
     });
 }
 
+/// The namespaces of local and remote-tracking branches.
+const BRANCHES: &[&str] = &["refs/heads", "refs/remotes"];
+
+/// A full ref name as its short name and what kind of ref that is.
+fn split_ref(full: &str) -> (&str, &'static str) {
+    const KINDS: [(&str, &str); 3] = [("refs/heads/", "local"), ("refs/remotes/", "remote"), ("refs/tags/", "tag")];
+    KINDS.iter().find_map(|(prefix, kind)| Some((full.strip_prefix(prefix)?, *kind))).unwrap_or((full, "ref"))
+}
+
 fn short_name(full: &str) -> &str {
-    full.strip_prefix("refs/heads/").or_else(|| full.strip_prefix("refs/remotes/")).unwrap_or(full)
+    split_ref(full).0
 }

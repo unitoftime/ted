@@ -162,6 +162,7 @@ impl Plugin for GitPlugin {
         repo_command(ed, "git-pull", "Pull menu", menus::pull);
         repo_command(ed, "git-fetch", "Fetch menu", menus::fetch);
         repo_command(ed, "git-branch", "Branch menu", menus::branch);
+        repo_command(ed, "git-tag", "Tag menu", menus::tag);
         repo_command(ed, "git-merge", "Merge menu", menus::merge);
         repo_command(ed, "git-rebase", "Rebase menu", menus::rebase);
         repo_command(ed, "git-log", "Show the log of the current branch", log::open);
@@ -206,6 +207,7 @@ impl Plugin for GitPlugin {
                         "git-fetch",
                         "git-pull",
                         "git-push",
+                        "git-tag",
                         "git-merge",
                         "git-rebase",
                         "git-stash",
@@ -239,6 +241,7 @@ impl Plugin for GitPlugin {
                     ("F", "git-pull"),
                     ("f", "git-fetch"),
                     ("b", "git-branch"),
+                    ("t", "git-tag"),
                     ("m", "git-merge"),
                     ("r", "git-rebase"),
                     ("l", "git-log"),
@@ -251,6 +254,7 @@ impl Plugin for GitPlugin {
         ed.define_mode(Mode::new(log::MODE).special().revert("git-log").keys(&[
             ("RET", "git-log-visit"),
             ("d", "git-diff"),
+            ("t", "git-tag"),
             ("x", "git-reset"),
             ("$", "git-process"),
         ]));

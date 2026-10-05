@@ -16,7 +16,7 @@ Ted currently is mostly just built for me. I'm actively using it instead of emac
 - Language servers (definitions, references, diagnostics, completion, hover, rename and
   formatting), with tree-sitter tags and buffer words as fallbacks when no server is
   running
-- Built-in git porcelain: status, staging, commits, log, blame, branches, merge, rebase and stash
+- Built-in git porcelain: status, staging, commits, log, blame, branches, tags, merge, rebase and stash
 - Built-in terminal emulator
 - Compilation buffers with clickable errors and `next-error`
 - Directory editor, recent files, project-wide file and text search
