@@ -162,6 +162,7 @@ impl Plugin for GitPlugin {
         repo_command(ed, "git-pull", "Pull menu", menus::pull);
         repo_command(ed, "git-fetch", "Fetch menu", menus::fetch);
         repo_command(ed, "git-branch", "Branch menu", menus::branch);
+        repo_command(ed, "git-rebase", "Rebase menu", menus::rebase);
         repo_command(ed, "git-log", "Show the log of the current branch", log::open);
         repo_command(ed, "git-diff", "Diff menu", menus::diff);
         repo_command(ed, "git-stash", "Stash menu", menus::stash);
@@ -204,6 +205,7 @@ impl Plugin for GitPlugin {
                         "git-fetch",
                         "git-pull",
                         "git-push",
+                        "git-rebase",
                         "git-stash",
                         "git-reset",
                         "git-log",
@@ -235,6 +237,7 @@ impl Plugin for GitPlugin {
                     ("F", "git-pull"),
                     ("f", "git-fetch"),
                     ("b", "git-branch"),
+                    ("r", "git-rebase"),
                     ("l", "git-log"),
                     ("d", "git-diff"),
                     ("z", "git-stash"),

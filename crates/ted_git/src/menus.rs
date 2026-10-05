@@ -1,4 +1,4 @@
-//! Menus for commit, push, pull, fetch, branch, stash and reset operations.
+//! Menus for commit, push, pull, fetch, branch, rebase, stash and reset operations.
 
 use std::path::{Path, PathBuf};
 
@@ -87,6 +87,19 @@ pub fn branch(ed: &mut Editor, root: PathBuf) {
         .entry('c', "Create and checkout", move |ed| create(ed, r2))
         .group("Delete")
         .entry('k', "Delete branch", move |ed| delete(ed, r3));
+    ed.push_modal(menu);
+}
+
+pub fn rebase(ed: &mut Editor, root: PathBuf) {
+    let (r1, r2) = (root.clone(), root.clone());
+    let menu = Menu::new("git-rebase", "Rebase")
+        .group("Rebase onto")
+        .entry('u', "Upstream", run(&root, &["rebase"], "Rebased"))
+        .entry('e', "Another branch", move |ed| rebase_onto(ed, r1))
+        .group("Stopped rebase")
+        .entry('r', "Continue", run(&root, &["rebase", "--continue"], "Rebased"))
+        .entry('s', "Skip this commit", run(&root, &["rebase", "--skip"], "Rebased"))
+        .entry('a', "Abort", move |ed| rebase_abort(ed, r2));
     ed.push_modal(menu);
 }
 
@@ -240,40 +253,38 @@ fn with_stash(
     });
 }
 
-/// Local branches and remote-tracking branches (without `*/HEAD`), by full ref name.
-fn with_branches(
+/// Picks a local branch, or with `remotes` a remote-tracking one too (not `*/HEAD`), and
+/// passes its full ref name to `then`.
+fn pick_branch(
     ed: &mut Editor,
     root: PathBuf,
+    id: &'static str,
+    title: &'static str,
     remotes: bool,
-    then: impl FnOnce(&mut Editor, PathBuf, Vec<String>) + Send + 'static,
+    then: impl FnOnce(&mut Editor, PathBuf, String) + Send + 'static,
 ) {
-    let mut refs = args(&["for-each-ref", "--format=%(refname)", "refs/heads"]);
+    let mut list = args(&["for-each-ref", "--format=%(refname)", "refs/heads"]);
     if remotes {
-        refs.push("refs/remotes".into());
+        list.push("refs/remotes".into());
     }
     let r = root.clone();
-    process::query(ed, root, refs, move |ed, out| {
-        let names = out.lines().filter(|l| !l.ends_with("/HEAD")).map(str::to_string).collect();
-        then(ed, r, names);
+    process::query(ed, root, list, move |ed, out| {
+        let refs: Vec<String> = out.lines().filter(|l| !l.ends_with("/HEAD")).map(str::to_string).collect();
+        let kind = |full: &str| if full.starts_with("refs/remotes/") { "remote" } else { "local" };
+        let items = refs.iter().map(|full| PickerItem::new(short_name(full), kind(full))).collect();
+        ed.pick(id, title, items, move |ed, index| then(ed, r, refs[index].clone()));
     });
 }
 
 fn checkout(ed: &mut Editor, root: PathBuf) {
-    with_branches(ed, root, true, |ed, root, refs| {
-        let items = refs
-            .iter()
-            .map(|r| PickerItem::new(short_name(r), if r.starts_with("refs/remotes/") { "remote" } else { "local" }))
-            .collect();
-        ed.pick("git-checkout", "Checkout branch", items, move |ed, index| {
-            let full = &refs[index];
-            // For a remote branch, checking out its local name creates a tracking branch.
-            let target = match full.strip_prefix("refs/remotes/") {
-                Some(remote) => remote.split_once('/').map_or(remote, |(_, name)| name).to_string(),
-                None => short_name(full).to_string(),
-            };
-            let done = format!("Checked out {}", target);
-            process::run(ed, root, args(&["checkout", &target]), None, &done, |_| {});
-        });
+    pick_branch(ed, root, "git-checkout", "Checkout branch", true, |ed, root, full| {
+        // For a remote branch, checking out its local name creates a tracking branch.
+        let target = match full.strip_prefix("refs/remotes/") {
+            Some(remote) => remote.split_once('/').map_or(remote, |(_, name)| name),
+            None => short_name(&full),
+        };
+        let done = format!("Checked out {}", target);
+        process::run(ed, root, args(&["checkout", target]), None, &done, |_| {});
     });
 }
 
@@ -288,18 +299,32 @@ fn create(ed: &mut Editor, root: PathBuf) {
 }
 
 fn delete(ed: &mut Editor, root: PathBuf) {
-    with_branches(ed, root, false, |ed, root, refs| {
-        let names: Vec<String> = refs.iter().map(|r| short_name(r).to_string()).collect();
-        let items = names.iter().map(|n| PickerItem::new(n.as_str(), "local")).collect();
-        ed.pick("git-branch-delete", "Delete branch", items, move |ed, index| {
-            let name = names[index].clone();
-            ed.confirm("git-branch-delete", format!("Delete branch {}? (y/n) ", name), move |ed, yes| {
-                if yes {
-                    let done = format!("Deleted {}", name);
-                    process::run(ed, root, args(&["branch", "-d", &name]), None, &done, |_| {});
-                }
-            });
+    pick_branch(ed, root, "git-branch-delete", "Delete branch", false, |ed, root, full| {
+        let name = short_name(&full).to_string();
+        ed.confirm("git-branch-delete", format!("Delete branch {}? (y/n) ", name), move |ed, yes| {
+            if yes {
+                let done = format!("Deleted {}", name);
+                process::run(ed, root, args(&["branch", "-d", &name]), None, &done, |_| {});
+            }
         });
+    });
+}
+
+/// Rebases the current branch onto a picked one.
+fn rebase_onto(ed: &mut Editor, root: PathBuf) {
+    pick_branch(ed, root, "git-rebase-onto", "Rebase onto", true, |ed, root, full| {
+        let onto = short_name(&full);
+        let done = format!("Rebased onto {}", onto);
+        process::run(ed, root, args(&["rebase", onto]), None, &done, |_| {});
+    });
+}
+
+/// Abandons the stopped rebase after confirmation, since the conflicts resolved so far go
+/// with it.
+fn rebase_abort(ed: &mut Editor, root: PathBuf) {
+    ed.confirm("git-rebase-abort", "Abort the rebase, discarding its progress? (y/n) ", move |ed, yes| match yes {
+        true => process::run(ed, root, args(&["rebase", "--abort"]), None, "Rebase aborted", |_| {}),
+        false => ed.set_status("Rebase not aborted"),
     });
 }
 

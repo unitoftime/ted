@@ -22,6 +22,20 @@ pub struct Head {
     pub ahead: u32,
     pub behind: u32,
     pub subject: String,
+    /// The rebase HEAD is stopped in, if any.
+    pub rebase: Option<Rebase>,
+}
+
+/// A rebase stopped partway, on a conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rebase {
+    /// The branch being rebased; `None` when HEAD was detached.
+    pub branch: Option<String>,
+    /// A branch at the commit it is rebased onto, else that commit's short hash.
+    pub onto: String,
+    /// The commit it stopped on, counting from 1, and how many it applies.
+    pub step: u32,
+    pub steps: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +264,10 @@ pub fn load(root: &Path) -> Result<Status, String> {
     let porcelain =
         git(root, &args(&["status", "--porcelain=v2", "--branch", "--untracked-files=normal", "-z"]), None)?;
     let (mut head, mut untracked) = parse_status(&porcelain);
+    // HEAD is detached all through a rebase, so on a branch there is none to look for.
+    if head.branch.is_none() {
+        head.rebase = load_rebase(root);
+    }
     let unstaged = renames::worktree_diff(root, &diff_args(&[]), Some(&mut untracked))?;
     let staged = parse_diff(&git(root, &diff_args(&["--cached"]), None)?);
     // These fail in a repository without commits; that just means no history.
@@ -257,6 +275,25 @@ pub fn load(root: &Path) -> Result<Status, String> {
     let recent = parse_log(&git(root, &log_args(10), None).unwrap_or_default());
     head.subject = recent.first().map(|c| c.subject.clone()).unwrap_or_default();
     Ok(Status { head, untracked, unstaged, staged, stashes, recent })
+}
+
+/// The rebase `root` is stopped in, read from the state git keeps for it.
+fn load_rebase(root: &Path) -> Option<Rebase> {
+    // Where the merge and apply backends keep it, with their files for the step and the
+    // number of steps.
+    const STATES: [(&str, &str, &str); 2] = [("rebase-merge", "msgnum", "end"), ("rebase-apply", "next", "last")];
+    let dirs = git(root, &args(&["rev-parse", "--git-path", STATES[0].0, "--git-path", STATES[1].0]), None).ok()?;
+    let (dir, (_, step, steps)) = dirs.lines().map(|dir| root.join(dir)).zip(STATES).find(|(dir, _)| dir.is_dir())?;
+    let read = |file: &str| std::fs::read_to_string(dir.join(file)).ok().map(|text| text.trim().to_string());
+    // `git am` keeps its state in `rebase-apply` too, without an `onto`.
+    let commit = read("onto")?;
+    let branch = read("head-name")?.strip_prefix("refs/heads/").map(str::to_string);
+    let named = git(root, &args(&["log", "-1", "--decorate=full", "--format=%h%x00%D", &commit]), None).ok()?;
+    let (hash, decoration) = named.trim_end().split_once('\0')?;
+    let refs = parse_refs(decoration);
+    let at = |kind: RefKind| refs.iter().find(|r| r.kind == kind);
+    let onto = at(RefKind::Local).or_else(|| at(RefKind::Remote)).map_or(hash, |r| r.name.as_str()).to_string();
+    Some(Rebase { branch, onto, step: read(step)?.parse().ok()?, steps: read(steps)?.parse().ok()? })
 }
 
 /// `git diff` arguments for `spec`: what to compare (`--cached`, a revision) and any
