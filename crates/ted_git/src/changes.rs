@@ -1,6 +1,7 @@
 //! Diffs as rows, shared by the status buffer's unstaged and staged sections and by diff
-//! buffers: a heading per file (its kind, path and line counts) with its hunks under it,
-//! and what the keys at point do to them: visit the line, stage, unstage or discard.
+//! buffers: a heading per file (its kind, path and line counts; a renamed file's path as
+//! `old → new`) with its hunks under it, and what the keys at point do to them: visit the
+//! line, stage, unstage or discard.
 
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
@@ -67,15 +68,17 @@ pub fn write(
     for (f, file) in files.iter().enumerate() {
         let kind = format!("{:<11}", file.kind);
         let (added, removed) = (format!("  +{}", file.added), format!(" -{}", file.removed));
-        row(
-            Line::File(f),
-            &[
-                (&kind, None),
-                (&file.path, Some(faces.file_heading)),
-                (&added, Some(faces.count_added)),
-                (&removed, Some(faces.count_removed)),
-            ],
-        );
+        let heading = Some(faces.file_heading);
+        let mut parts = vec![(kind.as_str(), None)];
+        if let Some(from) = &file.from {
+            parts.extend([(from.as_str(), heading), (" → ", None)]);
+        }
+        parts.extend([
+            (file.path.as_str(), heading),
+            (added.as_str(), Some(faces.count_added)),
+            (removed.as_str(), Some(faces.count_removed)),
+        ]);
+        row(Line::File(f), &parts);
         if !open(Line::File(f)) {
             continue;
         }
@@ -168,27 +171,40 @@ impl Command {
     }
 }
 
+/// `git <command> -- <paths>`.
+pub fn path_args<'a>(command: &[&'a str], paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    command.iter().copied().chain(["--"]).chain(paths).map(str::to_string).collect()
+}
+
 /// What `action` runs on `line`'s file or hunk, listed under `section` (`None` for diffs
-/// the index plays no part in, like a commit's), or why it doesn't apply.
+/// the index plays no part in, like a commit's), or why it doesn't apply. A renamed file
+/// is staged, unstaged and discarded as one change to both its paths, while taking one of
+/// its hunks back leaves the rename as it is.
 pub fn command(action: Action, section: Option<Section>, files: &[FileDiff], line: Line) -> Result<Command, &'static str> {
     let file = files.get(line.file()).ok_or(action.nothing_here())?;
     let path = file.path.as_str();
     let hunk = line.hunk();
-    let patch = || file.patch(hunk);
+    let on_paths = |command: &[&str]| path_args(command, file.paths());
     Ok(match (action, section, hunk) {
-        (Action::Stage, Some(Section::Unstaged), None) => Command::new(args(&["add", "--", path]), path),
+        (Action::Stage, Some(Section::Unstaged), None) => Command::new(on_paths(&["add"]), path),
         (Action::Stage, Some(Section::Unstaged), Some(_)) => {
-            Command::patch(args(&["apply", "--cached", "-"]), patch(), "this hunk")
+            Command::patch(args(&["apply", "--cached", "-"]), file.patch(hunk), "this hunk")
         }
-        (Action::Unstage, Some(Section::Staged), None) => Command::new(args(&["reset", "-q", "--", path]), path),
-        (Action::Unstage, Some(Section::Staged), Some(_)) => {
-            Command::patch(args(&["apply", "--cached", "--reverse", "-"]), patch(), "this hunk")
+        (Action::Unstage, Some(Section::Staged), None) => Command::new(on_paths(&["reset", "-q"]), path),
+        (Action::Unstage, Some(Section::Staged), Some(h)) => {
+            Command::patch(args(&["apply", "--cached", "--reverse", "-"]), file.patch_in_place(h), "this hunk")
         }
-        (Action::Discard, Some(Section::Unstaged), None) => {
-            Command::new(args(&["checkout", "--", path]), format!("changes to {}", path))
-        }
-        (Action::Discard, Some(Section::Unstaged), Some(_)) => {
-            Command::patch(args(&["apply", "--reverse", "-"]), patch(), "this hunk")
+        (Action::Discard, Some(Section::Unstaged), None) => match &file.from {
+            // The index has nothing to check out at the new path: unapplying the change
+            // moves the file back.
+            Some(from) => {
+                let what = format!("the rename of {} to {} and changes to it", from, path);
+                Command::patch(args(&["apply", "--reverse", "-"]), file.patch(None), &what)
+            }
+            None => Command::new(args(&["checkout", "--", path]), format!("changes to {}", path)),
+        },
+        (Action::Discard, Some(Section::Unstaged), Some(h)) => {
+            Command::patch(args(&["apply", "--reverse", "-"]), file.patch_in_place(h), "this hunk")
         }
         (Action::Discard, Some(Section::Staged), _) => return Err("Unstage it first (u), then discard"),
         _ => return Err(action.nothing_here()),

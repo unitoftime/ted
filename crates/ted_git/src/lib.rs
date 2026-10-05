@@ -31,6 +31,7 @@ mod log;
 mod menus;
 mod model;
 mod process;
+mod renames;
 mod status;
 
 use std::path::{Path, PathBuf};
@@ -165,9 +166,7 @@ impl Plugin for GitPlugin {
         repo_command(ed, "git-diff", "Diff menu", menus::diff);
         repo_command(ed, "git-stash", "Stash menu", menus::stash);
         repo_command(ed, "git-reset", "Reset menu", menus::reset);
-        repo_command(ed, "git-stage-all", "Stage all changes to tracked files", |ed, root| {
-            process::run(ed, root, args(&["add", "-u"]), None, "Staged all", |_| {})
-        });
+        repo_command(ed, "git-stage-all", "Stage all changes to tracked files", status::stage_all);
         repo_command(ed, "git-unstage-all", "Unstage everything", |ed, root| {
             process::run(ed, root, args(&["reset", "-q"]), None, "Unstaged all", |_| {})
         });

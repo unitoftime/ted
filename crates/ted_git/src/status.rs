@@ -12,7 +12,7 @@ use ted_core::{BufferId, BufferScope, Editor, FaceId};
 use crate::changes::{self, Action, Command, Fold, Line};
 use crate::diff::{self, Source};
 use crate::git::args;
-use crate::model::{self, Section, Status};
+use crate::model::{self, FileDiff, Section, Status};
 use crate::{generated_buffer, GitFaces};
 
 pub const MODE: &str = "Git Status";
@@ -263,7 +263,7 @@ pub fn act(ed: &mut Editor, action: Action) {
             Ok(Command::new(a, "all untracked files"))
         }
         (Action::Stage, Item::Untracked(i)) => Ok(Command::new(args(&["add", "--", &status.untracked[i]]), "")),
-        (Action::Stage, Item::Section(Section::Unstaged)) => Ok(Command::new(args(&["add", "-u"]), "")),
+        (Action::Stage, Item::Section(Section::Unstaged)) => Ok(Command::new(stage_all_args(&status.unstaged), "")),
         (Action::Unstage, Item::Section(Section::Staged)) => Ok(Command::new(args(&["reset", "-q"]), "")),
         (Action::Discard, Item::Section(Section::Unstaged)) => {
             Ok(Command::new(args(&["checkout", "--", "."]), "all unstaged changes"))
@@ -287,6 +287,23 @@ pub fn act(ed: &mut Editor, action: Action) {
         Ok(command) => changes::run(ed, root, action, command),
         Err(why) => ed.set_status(why),
     }
+}
+
+/// `git add` arguments staging every change in `unstaged`: `git add -u`, unless there are
+/// renames, whose new paths it would leave untracked. Then the paths are named.
+fn stage_all_args(unstaged: &[FileDiff]) -> Vec<String> {
+    if unstaged.iter().all(|file| file.from.is_none()) {
+        return args(&["add", "-u"]);
+    }
+    changes::path_args(&["add"], unstaged.iter().flat_map(FileDiff::paths))
+}
+
+/// `S`: stages all changes to tracked files of `root`, as its status buffer (if it has
+/// one) shows them.
+pub fn stage_all(ed: &mut Editor, root: PathBuf) {
+    let status = find_buffer(ed, &root).and_then(|id| ed.buffers[id].local::<StatusBuffer>()?.status.as_ref());
+    let args = stage_all_args(status.map_or(&[], |status| &status.unstaged));
+    crate::process::run(ed, root, args, None, "Staged all", |_| {});
 }
 
 /// Deletes untracked `paths` (a directory listed as `dir/` with everything in it) after

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::git::{args, git};
+use crate::renames;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
@@ -162,11 +163,23 @@ impl Hunk {
             .and_then(|n| n.parse().ok())
             .unwrap_or(1)
     }
+
+    /// Appends the hunk as it stands in a patch.
+    fn write(&self, out: &mut String) {
+        out.push_str(&self.header);
+        out.push('\n');
+        for line in &self.lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
     pub path: String,
+    /// The path a renamed file had before.
+    pub from: Option<String>,
     /// "modified", "new file", "deleted", "renamed" or "unmerged".
     pub kind: &'static str,
     /// Lines from `diff --git` up to the first hunk; needed to rebuild patches.
@@ -178,25 +191,35 @@ pub struct FileDiff {
 }
 
 impl FileDiff {
-    /// A patch `git apply` accepts, for one hunk or (with `None`) the whole file.
+    /// Every path the change touches: a renamed file's old path, then the path itself.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.from.as_deref().into_iter().chain([self.path.as_str()])
+    }
+
+    /// A patch `git apply` accepts, for one hunk or (with `None`) the whole file. A
+    /// renamed file's patch renames it too.
     pub fn patch(&self, hunk: Option<usize>) -> String {
         let mut out = String::new();
         for line in &self.header {
             out.push_str(line);
             out.push('\n');
         }
-        let hunks: Box<dyn Iterator<Item = &Hunk>> = match hunk {
-            Some(i) => Box::new(self.hunks.get(i).into_iter()),
-            None => Box::new(self.hunks.iter()),
+        let hunks = match hunk {
+            Some(i) => self.hunks.get(i..=i).unwrap_or_default(),
+            None => &self.hunks[..],
         };
-        for hunk in hunks {
-            out.push_str(&hunk.header);
-            out.push('\n');
-            for line in &hunk.lines {
-                out.push_str(line);
-                out.push('\n');
-            }
+        hunks.iter().for_each(|hunk| hunk.write(&mut out));
+        out
+    }
+
+    /// A patch of one hunk to the file where it is now, which for a renamed file is under
+    /// its new path: reversing it takes the hunk back and leaves the rename alone.
+    pub fn patch_in_place(&self, hunk: usize) -> String {
+        if self.from.is_none() {
+            return self.patch(Some(hunk));
         }
+        let mut out = format!("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n", self.path);
+        self.hunks.get(hunk).into_iter().for_each(|hunk| hunk.write(&mut out));
         out
     }
 }
@@ -226,14 +249,20 @@ impl Status {
 pub fn load(root: &Path) -> Result<Status, String> {
     let porcelain =
         git(root, &args(&["status", "--porcelain=v2", "--branch", "--untracked-files=normal", "-z"]), None)?;
-    let (mut head, untracked) = parse_status(&porcelain);
-    let unstaged = parse_diff(&git(root, &args(&["diff", "--no-ext-diff"]), None)?);
-    let staged = parse_diff(&git(root, &args(&["diff", "--cached", "--no-ext-diff"]), None)?);
+    let (mut head, mut untracked) = parse_status(&porcelain);
+    let unstaged = renames::worktree_diff(root, &diff_args(&[]), Some(&mut untracked))?;
+    let staged = parse_diff(&git(root, &diff_args(&["--cached"]), None)?);
     // These fail in a repository without commits; that just means no history.
     let stashes = parse_stashes(&git(root, &stash_list_args(), None).unwrap_or_default());
     let recent = parse_log(&git(root, &log_args(10), None).unwrap_or_default());
     head.subject = recent.first().map(|c| c.subject.clone()).unwrap_or_default();
     Ok(Status { head, untracked, unstaged, staged, stashes, recent })
+}
+
+/// `git diff` arguments for `spec`: what to compare (`--cached`, a revision) and any
+/// `-- <paths>` to limit it to.
+pub fn diff_args(spec: &[&str]) -> Vec<String> {
+    args(&[&["diff", "--no-ext-diff"], spec].concat())
 }
 
 /// Branch info and untracked paths from `git status --porcelain=v2 --branch -z`.
@@ -273,7 +302,8 @@ pub fn parse_diff(output: &str) -> Vec<FileDiff> {
         if line.starts_with("diff --git ") || line.starts_with("diff --cc ") {
             let kind = if line.starts_with("diff --cc ") { "unmerged" } else { "modified" };
             let header = vec![line.to_string()];
-            files.push(FileDiff { path: String::new(), kind, header, hunks: Vec::new(), added: 0, removed: 0 });
+            let (path, from) = (String::new(), None);
+            files.push(FileDiff { path, from, kind, header, hunks: Vec::new(), added: 0, removed: 0 });
             continue;
         }
         let Some(file) = files.last_mut() else { continue };
@@ -292,6 +322,7 @@ pub fn parse_diff(output: &str) -> Vec<FileDiff> {
     }
     for file in &mut files {
         file.path = path_of(&file.header);
+        file.from = file.header.iter().find_map(|l| l.strip_prefix("rename from ")).map(str::to_string);
         if file.kind == "modified" {
             file.kind = kind_of(&file.header);
         }

@@ -5,7 +5,7 @@
 //! diffs of unstaged or staged changes, and `g` reruns the diff.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ted_core::jobs::JobHandle;
 use ted_core::rows::{self, RowText};
@@ -13,7 +13,8 @@ use ted_core::{BufferId, BufferScope, Editor, FaceId};
 
 use crate::changes::{self, Action, Fold, Line};
 use crate::git::{args, git};
-use crate::model::{self, CommitDetails, FileDiff, Section};
+use crate::model::{self, diff_args, CommitDetails, FileDiff, Section};
+use crate::renames;
 use crate::status::{self, Item};
 use crate::{generated_buffer, GitFaces};
 
@@ -26,8 +27,8 @@ pub enum Source {
     Staged,
     /// The working tree against HEAD.
     Worktree,
-    /// One file's unstaged or staged changes.
-    File(Section, String),
+    /// One file's unstaged or staged changes: its path, after the old one if it is renamed.
+    File(Section, Vec<String>),
     Range(String),
     Commit(String),
     Stash(String),
@@ -45,16 +46,30 @@ impl Source {
     }
 
     fn args(&self) -> Vec<String> {
-        let diff = |extra: &[&str]| args(&[&["diff", "--no-ext-diff"], extra].concat());
+        let file = |spec: &[&str], paths: &[String]| {
+            diff_args(&spec.iter().copied().chain(paths.iter().map(String::as_str)).collect::<Vec<_>>())
+        };
         match self {
-            Source::Unstaged => diff(&[]),
-            Source::Staged => diff(&["--cached"]),
-            Source::Worktree => diff(&["HEAD"]),
-            Source::File(Section::Staged, path) => diff(&["--cached", "--", path]),
-            Source::File(_, path) => diff(&["--", path]),
-            Source::Range(range) => diff(&[range]),
+            Source::Unstaged => diff_args(&[]),
+            Source::Staged => diff_args(&["--cached"]),
+            Source::Worktree => diff_args(&["HEAD"]),
+            Source::File(Section::Staged, paths) => file(&["--cached", "--"], paths),
+            Source::File(_, paths) => file(&["--"], paths),
+            Source::Range(range) => diff_args(&[range]),
             Source::Commit(rev) => args(&["show", "--format=", "--no-ext-diff", "--diff-merges=first-parent", rev]),
             Source::Stash(name) => args(&["stash", "show", "-p", "--no-ext-diff", name]),
+        }
+    }
+
+    /// The files the source's diff changes. Runs git; call from a job.
+    fn files(&self, root: &Path) -> Result<Vec<FileDiff>, String> {
+        let args = self.args();
+        match self {
+            // Against the working tree, where git needs help to see a rename.
+            Source::Unstaged | Source::Worktree | Source::File(Section::Unstaged, _) => {
+                renames::worktree_diff(root, &args, None)
+            }
+            _ => git(root, &args, None).map(|diff| model::parse_diff(&diff)),
         }
     }
 
@@ -71,8 +86,8 @@ impl Source {
             Source::Unstaged => "Unstaged changes".into(),
             Source::Staged => "Staged changes".into(),
             Source::Worktree => "Changes since HEAD".into(),
-            Source::File(Section::Staged, path) => format!("Staged changes to {}", path),
-            Source::File(_, path) => format!("Unstaged changes to {}", path),
+            Source::File(Section::Staged, paths) => format!("Staged changes to {}", paths.join(" → ")),
+            Source::File(_, paths) => format!("Unstaged changes to {}", paths.join(" → ")),
             Source::Range(range) => format!("Diff {}", range),
             Source::Commit(rev) => format!("Commit {}", rev),
             Source::Stash(name) => format!("Stash {}", name),
@@ -127,10 +142,10 @@ pub fn rerun(ed: &mut Editor) {
 fn load(ed: &mut Editor, id: BufferId, root: PathBuf, source: Source, show: bool) {
     let job = ed.spawn(move |ctx| {
         let commit = source.commit().map(|rev| git(&root, &model::details_args(rev), None)).transpose();
-        let diff = git(&root, &source.args(), None);
+        let files = source.files(&root);
         ctx.send(move |ed| {
-            let (commit, files) = match (commit, diff) {
-                (Ok(commit), Ok(diff)) => (commit.and_then(|out| model::parse_details(&out)), model::parse_diff(&diff)),
+            let (commit, files) = match (commit, files) {
+                (Ok(commit), Ok(files)) => (commit.and_then(|out| model::parse_details(&out)), files),
                 (Err(e), _) | (_, Err(e)) => return ed.set_status(format!("git failed: {}", e)),
             };
             let Some(buf) = ed.buffers.get_mut(id) else { return };
@@ -258,7 +273,7 @@ pub fn dwim(ed: &mut Editor, root: PathBuf) {
     let source = match status {
         Some((Item::Section(Section::Staged), _)) => Source::Staged,
         Some((Item::Change(section, line), status)) => match status.files(section).get(line.file()) {
-            Some(file) => Source::File(section, file.path.clone()),
+            Some(file) => Source::File(section, file.paths().map(str::to_string).collect()),
             None => return,
         },
         Some((Item::Stash(i), status)) => Source::Stash(status.stashes[i].name.clone()),
