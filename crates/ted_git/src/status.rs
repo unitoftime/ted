@@ -172,6 +172,9 @@ fn render(ed: &mut Editor, id: BufferId) {
         let onto = (rebase.onto.as_str(), Some(faces.branch_local));
         r.line(&[("Rebasing: ", None), branch, (" onto ", None), onto, (&progress, None)]);
     }
+    if let Some(merging) = &head.merging {
+        r.line(&[("Merging:  ", None), (merging, Some(faces.branch_local))]);
+    }
 
     if !status.untracked.is_empty() {
         let title = format!("Untracked files ({})", status.untracked.len());

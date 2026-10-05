@@ -1,6 +1,6 @@
 //! Repository state as shown in the status buffer, parsed from git's plumbing output.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::git::{args, git};
 use crate::renames;
@@ -24,6 +24,9 @@ pub struct Head {
     pub subject: String,
     /// The rebase HEAD is stopped in, if any.
     pub rebase: Option<Rebase>,
+    /// What the merge HEAD is stopped in brings in, if there is one: a branch at each
+    /// merged commit, else its short hash.
+    pub merging: Option<String>,
 }
 
 /// A rebase stopped partway, on a conflict.
@@ -264,9 +267,9 @@ pub fn load(root: &Path) -> Result<Status, String> {
     let porcelain =
         git(root, &args(&["status", "--porcelain=v2", "--branch", "--untracked-files=normal", "-z"]), None)?;
     let (mut head, mut untracked) = parse_status(&porcelain);
-    // HEAD is detached all through a rebase, so on a branch there is none to look for.
-    if head.branch.is_none() {
-        head.rebase = load_rebase(root);
+    if let Some(git_dir) = git_dir(root) {
+        head.rebase = load_rebase(root, &git_dir);
+        head.merging = load_merge(root, &git_dir);
     }
     let unstaged = renames::worktree_diff(root, &diff_args(&[]), Some(&mut untracked))?;
     let staged = parse_diff(&git(root, &diff_args(&["--cached"]), None)?);
@@ -277,23 +280,44 @@ pub fn load(root: &Path) -> Result<Status, String> {
     Ok(Status { head, untracked, unstaged, staged, stashes, recent })
 }
 
+/// Where git keeps the state of the worktree at `root`: its `.git`, or the directory that
+/// names when it is a file, as in a linked worktree. Read off the file system, since
+/// every status refresh looks there for a stopped rebase or merge.
+fn git_dir(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    match std::fs::read_to_string(&dot_git) {
+        Ok(file) => file.strip_prefix("gitdir: ").map(|dir| root.join(dir.trim_end())),
+        Err(_) => Some(dot_git),
+    }
+}
+
 /// The rebase `root` is stopped in, read from the state git keeps for it.
-fn load_rebase(root: &Path) -> Option<Rebase> {
+fn load_rebase(root: &Path, git_dir: &Path) -> Option<Rebase> {
     // Where the merge and apply backends keep it, with their files for the step and the
     // number of steps.
     const STATES: [(&str, &str, &str); 2] = [("rebase-merge", "msgnum", "end"), ("rebase-apply", "next", "last")];
-    let dirs = git(root, &args(&["rev-parse", "--git-path", STATES[0].0, "--git-path", STATES[1].0]), None).ok()?;
-    let (dir, (_, step, steps)) = dirs.lines().map(|dir| root.join(dir)).zip(STATES).find(|(dir, _)| dir.is_dir())?;
+    let (dir, step, steps) =
+        STATES.iter().map(|(dir, step, steps)| (git_dir.join(dir), step, steps)).find(|(dir, ..)| dir.is_dir())?;
     let read = |file: &str| std::fs::read_to_string(dir.join(file)).ok().map(|text| text.trim().to_string());
     // `git am` keeps its state in `rebase-apply` too, without an `onto`.
-    let commit = read("onto")?;
+    let onto = branch_at(root, &read("onto")?)?;
     let branch = read("head-name")?.strip_prefix("refs/heads/").map(str::to_string);
-    let named = git(root, &args(&["log", "-1", "--decorate=full", "--format=%h%x00%D", &commit]), None).ok()?;
+    Some(Rebase { branch, onto, step: read(step)?.parse().ok()?, steps: read(steps)?.parse().ok()? })
+}
+
+/// What the merge `root` is stopped in brings in, from the heads git keeps for it.
+fn load_merge(root: &Path, git_dir: &Path) -> Option<String> {
+    let heads = std::fs::read_to_string(git_dir.join("MERGE_HEAD")).ok()?;
+    Some(heads.lines().filter_map(|commit| branch_at(root, commit)).collect::<Vec<_>>().join(", "))
+}
+
+/// A branch at `commit`, local before remote, else the commit's short hash.
+fn branch_at(root: &Path, commit: &str) -> Option<String> {
+    let named = git(root, &args(&["log", "-1", "--decorate=full", "--format=%h%x00%D", commit]), None).ok()?;
     let (hash, decoration) = named.trim_end().split_once('\0')?;
     let refs = parse_refs(decoration);
     let at = |kind: RefKind| refs.iter().find(|r| r.kind == kind);
-    let onto = at(RefKind::Local).or_else(|| at(RefKind::Remote)).map_or(hash, |r| r.name.as_str()).to_string();
-    Some(Rebase { branch, onto, step: read(step)?.parse().ok()?, steps: read(steps)?.parse().ok()? })
+    Some(at(RefKind::Local).or_else(|| at(RefKind::Remote)).map_or(hash, |r| r.name.as_str()).to_string())
 }
 
 /// `git diff` arguments for `spec`: what to compare (`--cached`, a revision) and any

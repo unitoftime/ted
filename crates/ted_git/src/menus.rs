@@ -1,4 +1,4 @@
-//! Menus for commit, push, pull, fetch, branch, rebase, stash and reset operations.
+//! Menus for commit, push, pull, fetch, branch, merge, rebase, stash and reset operations.
 
 use std::path::{Path, PathBuf};
 
@@ -90,6 +90,22 @@ pub fn branch(ed: &mut Editor, root: PathBuf) {
     ed.push_modal(menu);
 }
 
+pub fn merge(ed: &mut Editor, root: PathBuf) {
+    let merge = |options: &'static [&'static str]| {
+        let root = root.clone();
+        move |ed: &mut Editor| merge_branch(ed, root, options)
+    };
+    let abort_root = root.clone();
+    let menu = Menu::new("git-merge", "Merge")
+        .group("Merge into the current branch")
+        .entry('m', "A branch", merge(&[]))
+        .entry('n', "A branch, always with a merge commit", merge(&["--no-ff"]))
+        .group("Stopped merge")
+        .entry('c', "Continue", run(&root, &["merge", "--continue"], "Merged"))
+        .entry('a', "Abort", move |ed| abort(ed, abort_root, "merge"));
+    ed.push_modal(menu);
+}
+
 pub fn rebase(ed: &mut Editor, root: PathBuf) {
     let (r1, r2) = (root.clone(), root.clone());
     let menu = Menu::new("git-rebase", "Rebase")
@@ -99,7 +115,7 @@ pub fn rebase(ed: &mut Editor, root: PathBuf) {
         .group("Stopped rebase")
         .entry('r', "Continue", run(&root, &["rebase", "--continue"], "Rebased"))
         .entry('s', "Skip this commit", run(&root, &["rebase", "--skip"], "Rebased"))
-        .entry('a', "Abort", move |ed| rebase_abort(ed, r2));
+        .entry('a', "Abort", move |ed| abort(ed, r2, "rebase"));
     ed.push_modal(menu);
 }
 
@@ -310,6 +326,15 @@ fn delete(ed: &mut Editor, root: PathBuf) {
     });
 }
 
+/// Merges a picked branch into the current one with `git merge <options>`.
+fn merge_branch(ed: &mut Editor, root: PathBuf, options: &'static [&'static str]) {
+    pick_branch(ed, root, "git-merge-branch", "Merge", true, move |ed, root, full| {
+        let branch = short_name(&full);
+        let done = format!("Merged {}", branch);
+        process::run(ed, root, args(&[&["merge"], options, &[branch]].concat()), None, &done, |_| {});
+    });
+}
+
 /// Rebases the current branch onto a picked one.
 fn rebase_onto(ed: &mut Editor, root: PathBuf) {
     pick_branch(ed, root, "git-rebase-onto", "Rebase onto", true, |ed, root, full| {
@@ -319,12 +344,16 @@ fn rebase_onto(ed: &mut Editor, root: PathBuf) {
     });
 }
 
-/// Abandons the stopped rebase after confirmation, since the conflicts resolved so far go
-/// with it.
-fn rebase_abort(ed: &mut Editor, root: PathBuf) {
-    ed.confirm("git-rebase-abort", "Abort the rebase, discarding its progress? (y/n) ", move |ed, yes| match yes {
-        true => process::run(ed, root, args(&["rebase", "--abort"]), None, "Rebase aborted", |_| {}),
-        false => ed.set_status("Rebase not aborted"),
+/// Abandons the stopped `operation` (`merge` or `rebase`) after confirmation, since the
+/// conflicts resolved so far go with it.
+fn abort(ed: &mut Editor, root: PathBuf, operation: &'static str) {
+    let label = format!("Abort the {}, discarding its progress? (y/n) ", operation);
+    ed.confirm(&format!("git-{}-abort", operation), label, move |ed, yes| match yes {
+        true => {
+            let done = format!("Aborted the {}", operation);
+            process::run(ed, root, args(&[operation, "--abort"]), None, &done, |_| {});
+        }
+        false => ed.set_status("Abort cancelled"),
     });
 }
 
