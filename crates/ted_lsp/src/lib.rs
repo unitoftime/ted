@@ -14,7 +14,9 @@
 //! - organizes imports (`organize-imports`), and applies a mode's `lsp.save_actions`
 //!   (`source.organizeImports`) before its buffers are saved;
 //! - reports diagnostics, underlined in the buffer and listed by `lsp-diagnostics`
-//!   (`C-c !`).
+//!   (`C-c !`);
+//! - hears what other programs change on disk (a checkout, a code generator), if it is one
+//!   that doesn't watch the file system itself (see `watched_files`).
 //!
 //! Settings (`init.rhai`): `lsp.enabled`, `lsp.diagnostics`, `lsp.server` (the server's
 //! command line, empty for none), `lsp.settings` (a map sent as the server's
@@ -32,6 +34,7 @@ mod rename;
 mod servers;
 mod source_actions;
 mod transport;
+mod watched_files;
 mod workspace_edit;
 mod xref;
 
@@ -75,6 +78,7 @@ impl Plugin for LspPlugin {
         hover::register(ed);
         rename::register(ed);
         source_actions::register(ed);
+        watched_files::register(ed);
         ed.commands.register("lsp-restart", "Restart the language server of this buffer", |ed, _| {
             client::restart(ed);
         });

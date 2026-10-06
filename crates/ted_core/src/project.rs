@@ -9,7 +9,7 @@
 //! in `FileLists` and refreshed in the background whenever it is used: the file switcher
 //! opens populated, and new files show up once the refresh lands.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +22,13 @@ use crate::text::directory_of;
 
 /// Files listed per project at most.
 pub const MAX_FILES: usize = 50_000;
+
+/// Directories found by one `Project::dirs_under` at most.
+pub const MAX_DIRS: usize = 10_000;
+
+/// Paths handed to one `git check-ignore`. It prints as it reads, so its answer has to fit
+/// in the pipe while the paths are still being written.
+const IGNORE_BATCH: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -96,6 +103,48 @@ impl Project {
         }
         files
     }
+
+    /// The project's directories at and below `tops`, level by level, at most `MAX_DIRS`.
+    /// Those git ignores are left out with all they hold, and below `tops` so are hidden
+    /// ones and other repositories. Blocks on the file system and git; call it from a job.
+    pub fn dirs_under(&self, tops: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut level = tops;
+        while !level.is_empty() && found.len() < MAX_DIRS {
+            let ignored = self.ignored(&level);
+            level.retain(|dir| !ignored.contains(dir));
+            let below = level.iter().flat_map(|dir| subdirs(dir)).collect();
+            found.append(&mut level);
+            level = below;
+        }
+        found.truncate(MAX_DIRS);
+        found
+    }
+
+    /// Which of `paths` (absolute, in the project) git ignores; none outside a repository.
+    fn ignored(&self, paths: &[PathBuf]) -> HashSet<PathBuf> {
+        let mut ignored = HashSet::new();
+        for batch in paths.chunks(IGNORE_BATCH).filter(|_| self.git) {
+            let mut input = Vec::new();
+            for path in batch {
+                input.extend_from_slice(path.as_os_str().as_encoded_bytes());
+                input.push(0);
+            }
+            // It fails when none of them is ignored, so only what it printed counts.
+            let answer = Program::new("git", &self.root).args(["check-ignore", "-z", "--stdin"]).output(Some(&input));
+            ignored.extend(answer.stdout.split('\0').filter(|path| !path.is_empty()).map(PathBuf::from));
+        }
+        ignored
+    }
+}
+
+/// The directories in `dir` that a walk of its project goes into.
+fn subdirs(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    let entries = fs::read_dir(dir).into_iter().flatten().flatten();
+    let visible = entries.filter(|entry| {
+        entry.file_type().is_ok_and(|t| t.is_dir()) && !entry.file_name().to_string_lossy().starts_with('.')
+    });
+    visible.map(|entry| entry.path()).filter(|dir| !dir.join(".git").exists())
 }
 
 /// A project's files, relative to its root; `None` while its first listing runs.

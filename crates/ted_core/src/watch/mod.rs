@@ -3,7 +3,9 @@
 //! is unavailable, every file is rechecked periodically.
 //!
 //! Watching directories rather than files keeps working across atomic saves, where a
-//! program writes a new file and renames it over the old one.
+//! program writes a new file and renames it over the old one. A watch covers the files and
+//! directories right in its directory; whoever follows a whole tree watches each directory
+//! of it, adding the new ones as they are reported.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,10 +42,27 @@ mod inotify {
 
 /// What changed in the watched directories.
 pub enum Changes {
-    /// These files, sorted.
-    Paths(Vec<PathBuf>),
+    /// These paths, sorted, each with the last thing that happened to it.
+    Paths(Vec<Change>),
     /// Anything may have: events were lost, or there is nothing reporting them.
     Unknown,
+}
+
+/// A path in a watched directory, and what happened to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub path: PathBuf,
+    pub event: Event,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// A file was written, created, renamed into place or touched.
+    Written,
+    /// A directory was created or moved in.
+    NewDir,
+    /// The file or directory was deleted or moved away.
+    Removed,
 }
 
 /// Runs on the UI thread with each batch of changes. Returns whether it changed anything
@@ -63,15 +82,21 @@ pub struct Watcher {
 impl Watcher {
     /// Starts reporting changes in watched directories to `on_change`.
     pub fn new(ed: &mut Editor, on_change: OnChange) -> Self {
-        let (_, ctx) = ed.job_context();
-        let inotify = inotify::Inotify::start(ctx, on_change);
-        if inotify.is_none() {
+        Self::events_only(ed, on_change).unwrap_or_else(|| {
             ed.add_timer(POLL_INTERVAL, move |ed| on_change(ed, Changes::Unknown));
-        }
-        Self { inotify, dirs: HashMap::new() }
+            Self { inotify: None, dirs: HashMap::new() }
+        })
     }
 
-    /// Reports changes to the files in `dir` until it is unwatched as many times.
+    /// Like `new`, but `None` where nothing reports changes, instead of rechecking
+    /// periodically: for callers with too much to recheck.
+    pub fn events_only(ed: &Editor, on_change: OnChange) -> Option<Self> {
+        let (_, ctx) = ed.job_context();
+        let inotify = inotify::Inotify::start(ctx, on_change)?;
+        Some(Self { inotify: Some(inotify), dirs: HashMap::new() })
+    }
+
+    /// Reports changes to what is in `dir` until it is unwatched as many times.
     pub fn watch(&mut self, dir: &Path) {
         let Some(inotify) = &self.inotify else { return };
         let (wd, users) = self.dirs.entry(dir.to_path_buf()).or_insert((None, 0));

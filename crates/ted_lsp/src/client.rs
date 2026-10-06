@@ -25,7 +25,7 @@ use ted_core::{BufferId, Edit, Editor};
 use crate::protocol::{path_to_uri, Encoding};
 use crate::servers::{config_json, ServerSpec};
 use crate::transport::{Outgoing, ServerContext, Transport};
-use crate::{diagnostics, handles};
+use crate::{diagnostics, handles, watched_files};
 
 /// Index of a client in `Lsp::clients`. Never reused: a restarted server gets a new one,
 /// so late messages from the old process can't be mistaken for the new one's.
@@ -328,6 +328,18 @@ pub fn sync_idle(ed: &mut Editor) -> bool {
     false
 }
 
+/// Server `server`, while it runs.
+pub fn live(ed: &Editor, server: ServerId) -> Option<&Client> {
+    ed.ext::<Lsp>()?.clients.get(server).filter(|c| c.is_live())
+}
+
+/// Sends a notification, unless the server is gone.
+pub fn notify(ed: &mut Editor, server: ServerId, method: &str, params: Value) {
+    if let Some(client) = ed.ext_mut::<Lsp>().clients.get_mut(server) {
+        client.send(Outgoing::notification(method, params));
+    }
+}
+
 /// Sends a request; `on_result` runs on the UI thread with the server's answer. A server
 /// that is gone answers with an error right away.
 pub fn request(
@@ -398,6 +410,7 @@ pub fn restart(ed: &mut Editor) {
 
 /// Shuts `server` down and fails its outstanding requests, so waiting commands move on.
 fn stop(ed: &mut Editor, server: ServerId) {
+    watched_files::unwatch(ed, server);
     let Some(client) = ed.ext_mut::<Lsp>().clients.get_mut(server) else {
         return;
     };
@@ -447,6 +460,7 @@ fn start(
     client.pending.insert(0, Box::new(move |ed, result| initialized(ed, server, result)));
     let status = format!("Starting {} in {}", client.name, collapse_tilde(root));
     ed.ext_mut::<Lsp>().clients.push(client);
+    watched_files::watch(ed, server);
     ed.set_status(status);
     Ok(server)
 }

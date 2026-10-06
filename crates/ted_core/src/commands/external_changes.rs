@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use crate::buffer::BufferId;
 use crate::editor::Editor;
 use crate::ui::Choice;
-use crate::watch::{Changes, Watcher};
+use crate::watch::{Changes, Event, Watcher};
 
 #[derive(Default)]
 struct ExternalChanges {
@@ -61,9 +61,14 @@ fn watch_file(ed: &mut Editor, id: BufferId, file: Option<PathBuf>) {
 fn on_change(ed: &mut Editor, changes: Changes) -> bool {
     match changes {
         Changes::Unknown => return check_all(ed),
-        Changes::Paths(paths) => {
+        Changes::Paths(changes) => {
+            // A file that was removed leaves its buffer as it is.
+            let written = |file: &PathBuf| {
+                let found = changes.binary_search_by(|change| change.path.cmp(file));
+                found.is_ok_and(|at| changes[at].event == Event::Written)
+            };
             let state = ed.ext_mut::<ExternalChanges>();
-            let changed = state.files.iter().filter(|(_, file)| paths.binary_search(file).is_ok());
+            let changed = state.files.iter().filter(|(_, file)| written(file));
             let changed: Vec<BufferId> = changed.map(|(&id, _)| id).collect();
             state.pending.extend(changed);
         }

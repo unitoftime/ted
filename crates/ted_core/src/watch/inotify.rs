@@ -11,11 +11,18 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{Changes, OnChange};
+use super::{Change, Changes, Event, OnChange};
 use crate::jobs::JobContext;
 
-/// A file in the directory was written, created, renamed into place or touched.
-const EVENTS: u32 = libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_CREATE | libc::IN_ATTRIB | libc::IN_ONLYDIR;
+/// A file in the directory was written, created, renamed into place or touched, a
+/// directory was added to it, or either was deleted or renamed away.
+const EVENTS: u32 = libc::IN_CLOSE_WRITE
+    | libc::IN_MOVED_TO
+    | libc::IN_CREATE
+    | libc::IN_ATTRIB
+    | libc::IN_DELETE
+    | libc::IN_MOVED_FROM
+    | libc::IN_ONLYDIR;
 
 const HEADER: usize = std::mem::size_of::<libc::inotify_event>();
 
@@ -85,22 +92,29 @@ fn read_events(fd: &OwnedFd, stop: &OwnedFd, dirs: &Dirs, ctx: &JobContext, on_c
         }
 
         // Drain everything queued so a burst (a build, a checkout) arrives as one batch.
-        let (mut paths, mut overflowed) = (Vec::new(), false);
+        let (mut changes, mut overflowed) = (Vec::new(), false);
         loop {
             let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
                 break;
             }
-            overflowed |= parse(&buf[..n as usize], &dirs.lock(), &mut paths);
+            overflowed |= parse(&buf[..n as usize], &dirs.lock(), &mut changes);
         }
         let changes = if overflowed {
             Changes::Unknown
-        } else if paths.is_empty() {
+        } else if changes.is_empty() {
             continue;
         } else {
-            paths.sort_unstable();
-            paths.dedup();
-            Changes::Paths(paths)
+            // In the order they happened within a path, whose last event is the one kept.
+            changes.sort_by(|a, b| a.path.cmp(&b.path));
+            changes.dedup_by(|later, kept| {
+                let same = later.path == kept.path;
+                if same {
+                    kept.event = later.event;
+                }
+                same
+            });
+            Changes::Paths(changes)
         };
         if !ctx.send(move |ed| {
             on_change(ed, changes);
@@ -110,8 +124,8 @@ fn read_events(fd: &OwnedFd, stop: &OwnedFd, dirs: &Dirs, ctx: &JobContext, on_c
     }
 }
 
-/// Adds the files `events` are about to `paths`. Returns whether the kernel dropped events.
-fn parse(mut events: &[u8], dirs: &HashMap<i32, PathBuf>, paths: &mut Vec<PathBuf>) -> bool {
+/// Adds what `events` report to `changes`. Returns whether the kernel dropped events.
+fn parse(mut events: &[u8], dirs: &HashMap<i32, PathBuf>, changes: &mut Vec<Change>) -> bool {
     let mut overflowed = false;
     while events.len() >= HEADER {
         let field = |at: usize| u32::from_ne_bytes(events[at..at + 4].try_into().unwrap());
@@ -121,9 +135,24 @@ fn parse(mut events: &[u8], dirs: &HashMap<i32, PathBuf>, paths: &mut Vec<PathBu
         overflowed |= mask & libc::IN_Q_OVERFLOW != 0;
         // The name is padded with NULs; events about the directory itself have none.
         let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(len)];
-        if let Some(dir) = dirs.get(&wd).filter(|_| !name.is_empty()) {
-            paths.push(dir.join(OsStr::from_bytes(name)));
+        if let (Some(dir), Some(event)) = (dirs.get(&wd).filter(|_| !name.is_empty()), event_of(mask)) {
+            changes.push(Change { path: dir.join(OsStr::from_bytes(name)), event });
         }
     }
     overflowed
+}
+
+/// What an event with `mask` reports, if anything: a directory that was only touched is
+/// of no interest.
+fn event_of(mask: u32) -> Option<Event> {
+    let is_dir = mask & libc::IN_ISDIR != 0;
+    if mask & (libc::IN_DELETE | libc::IN_MOVED_FROM) != 0 {
+        Some(Event::Removed)
+    } else if !is_dir {
+        Some(Event::Written)
+    } else if mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 {
+        Some(Event::NewDir)
+    } else {
+        None
+    }
 }
