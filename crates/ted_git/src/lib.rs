@@ -7,9 +7,9 @@
 //! | `TAB` | expand/collapse the section, file or hunk at point |
 //! | `n` / `p` | next/previous item |
 //! | `RET` | visit the file at point (at the diff line), or show the commit |
-//! | `s` / `u` | stage/unstage the section, file or hunk at point |
+//! | `s` / `u` | stage/unstage the section, file or hunk at point, or the selected lines of hunks |
 //! | `S` / `U` | stage all tracked changes / unstage everything |
-//! | `k` | discard the untracked file or directory, or unstaged change, at point |
+//! | `k` | discard the untracked file or directory, or unstaged change, at point, or the selected lines of hunks |
 //! | `c` `P` `F` `f` `b` `d` `z` `x` | commit, push, pull, fetch, branch, diff, stash and reset menus |
 //! | `l` | log; RET shows a commit |
 //! | `h` / `?` | popup of the commands available here (runs them too) |
@@ -183,9 +183,9 @@ impl Plugin for GitPlugin {
         });
         c.register("git-visit", "Visit the file or commit at point", |ed, _| at_point(ed, status::visit, diff::visit));
         for (name, doc, action) in [
-            ("git-stage", "Stage the change at point", Action::Stage),
-            ("git-unstage", "Unstage the change at point", Action::Unstage),
-            ("git-discard", "Discard the change at point", Action::Discard),
+            ("git-stage", "Stage the change at point, or the selected lines", Action::Stage),
+            ("git-unstage", "Unstage the change at point, or the selected lines", Action::Unstage),
+            ("git-discard", "Discard the change at point, or the selected lines", Action::Discard),
         ] {
             c.register(name, doc, move |ed, _| at_point(ed, |ed| status::act(ed, action), |ed| diff::act(ed, action)));
         }

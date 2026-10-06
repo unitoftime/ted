@@ -1,7 +1,8 @@
 //! Diffs as rows, shared by the status buffer's unstaged and staged sections and by diff
 //! buffers: a heading per file (its kind, path and line counts, or a binary file's sizes; a
 //! renamed file's path as `old → new`) with its hunks under it, and what the keys at point
-//! do to them: visit the line, stage, unstage or discard.
+//! do to them: visit the line, stage, unstage or discard. A selection stages, unstages or
+//! discards just the changed lines it covers.
 
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,14 @@ impl Line {
         match self {
             Line::File(_) => None,
             Line::Hunk(_, h) | Line::Body(_, h, _) => Some(h),
+        }
+    }
+
+    /// The file, hunk and line of a line of a hunk's body.
+    pub fn body(self) -> Option<(usize, usize, usize)> {
+        match self {
+            Line::Body(f, h, l) => Some((f, h, l)),
+            _ => None,
         }
     }
 }
@@ -200,50 +209,85 @@ pub fn path_args<'a>(command: &[&'a str], paths: impl IntoIterator<Item = &'a st
     command.iter().copied().chain(["--"]).chain(paths).map(str::to_string).collect()
 }
 
-/// What `action` runs on `line`'s file or hunk, listed under `section` (`None` for diffs
-/// the index plays no part in, like a commit's), or why it doesn't apply. A renamed file
-/// is staged, unstaged and discarded as one change to both its paths, while taking one of
-/// its hunks back leaves the rename as it is.
-pub fn command(action: Action, section: Option<Section>, files: &[FileDiff], line: Line) -> Result<Command, &'static str> {
-    let file = files.get(line.file()).ok_or(action.nothing_here())?;
-    let path = file.path.as_str();
-    let hunk = line.hunk();
-    let on_paths = |command: &[&str]| path_args(command, file.paths());
-    Ok(match (action, section, hunk) {
-        (Action::Stage, Some(Section::Unstaged), None) => Command::new(on_paths(&["add"]), path),
-        (Action::Stage, Some(Section::Unstaged), Some(_)) => {
-            Command::patch(args(&["apply", "--cached", "-"]), file.patch(hunk), "this hunk")
-        }
-        (Action::Unstage, Some(Section::Staged), None) => Command::new(on_paths(&["reset", "-q"]), path),
-        (Action::Unstage, Some(Section::Staged), Some(h)) => {
-            Command::patch(args(&["apply", "--cached", "--reverse", "-"]), file.patch_in_place(h), "this hunk")
-        }
-        (Action::Discard, Some(Section::Unstaged), None) => match &file.from {
-            // The index has nothing to check out at the new path: unapplying the change
-            // moves the file back.
-            Some(from) => {
-                let what = format!("the rename of {} to {} and changes to it", from, path);
-                Command::patch(args(&["apply", "--reverse", "-"]), file.patch(None), &what)
-            }
-            None => Command::new(args(&["checkout", "--", path]), format!("changes to {}", path)),
-        },
-        (Action::Discard, Some(Section::Unstaged), Some(h)) => {
-            Command::patch(args(&["apply", "--reverse", "-"]), file.patch_in_place(h), "this hunk")
-        }
-        (Action::Discard, Some(Section::Staged), _) => return Err("Unstage it first (u), then discard"),
+/// How `git apply` takes a patch of changes listed under `section` for `action`: its
+/// arguments, and whether they apply the patch in reverse. `--recount`, since a hunk cut
+/// down to some of its lines keeps its header.
+fn apply(action: Action, section: Option<Section>) -> Result<(Vec<String>, bool), &'static str> {
+    Ok(match (action, section) {
+        (Action::Stage, Some(Section::Unstaged)) => (args(&["apply", "--cached", "--recount", "-"]), false),
+        (Action::Unstage, Some(Section::Staged)) => (args(&["apply", "--cached", "--reverse", "--recount", "-"]), true),
+        (Action::Discard, Some(Section::Unstaged)) => (args(&["apply", "--reverse", "--recount", "-"]), true),
+        (Action::Discard, Some(Section::Staged)) => return Err("Unstage it first (u), then discard"),
         _ => return Err(action.nothing_here()),
     })
 }
 
-/// Runs `command` for `action` in `root`, after confirmation when it discards changes.
-pub fn run(ed: &mut Editor, root: PathBuf, action: Action, command: Command) {
-    let Command { args, stdin, what } = command;
+/// What `action` runs on changes of `files`, listed under `section` (`None` for diffs the
+/// index plays no part in, like a commit's), or why it doesn't apply: on the changed lines
+/// among the lines of hunks in `selected` (the rows a selection covers, in the order they
+/// show) and on those alone, else on the file or hunk `at` is in.
+///
+/// A renamed file is staged, unstaged and discarded as one change to both its paths,
+/// while taking some of its lines back leaves the rename as it is.
+pub fn command(
+    action: Action,
+    section: Option<Section>,
+    files: &[FileDiff],
+    at: Option<Line>,
+    selected: &[Line],
+) -> Result<Command, &'static str> {
+    let (apply, reverse) = apply(action, section)?;
+    let picks: Vec<_> = selected.iter().filter_map(|line| line.body()).collect();
+    if !picks.is_empty() {
+        let mut patch = String::new();
+        for picks in picks.chunk_by(|a, b| a.0 == b.0) {
+            let f = picks[0].0;
+            let Some(file) = files.get(f) else { continue };
+            patch.push_str(&file.patch_picked(reverse, |h, l| picks.binary_search(&(f, h, l)).is_ok()));
+        }
+        if patch.is_empty() {
+            return Err("No changed lines in the selection");
+        }
+        return Ok(Command::patch(apply, patch, "the selected lines"));
+    }
+
+    let line = at.ok_or(action.nothing_here())?;
+    let file = files.get(line.file()).ok_or(action.nothing_here())?;
+    let path = file.path.as_str();
+    let on_paths = |command: &[&str]| path_args(command, file.paths());
+    Ok(match (action, line.hunk()) {
+        (_, Some(h)) => Command::patch(apply, file.patch_picked(reverse, |hunk, _| hunk == h), "this hunk"),
+        (Action::Stage, None) => Command::new(on_paths(&["add"]), path),
+        (Action::Unstage, None) => Command::new(on_paths(&["reset", "-q"]), path),
+        (Action::Discard, None) => match &file.from {
+            // The index has nothing to check out at the new path: unapplying the change
+            // moves the file back.
+            Some(from) => {
+                let what = format!("the rename of {} to {} and changes to it", from, path);
+                Command::patch(apply, file.patch(), &what)
+            }
+            None => Command::new(args(&["checkout", "--", path]), format!("changes to {}", path)),
+        },
+    })
+}
+
+/// Runs `command` for `action` in `root`, after confirmation when it discards changes, or
+/// says why there is none to run. Ends the selection it may have been for.
+pub fn run(ed: &mut Editor, root: PathBuf, action: Action, command: Result<Command, &'static str>) {
+    let Command { args, stdin, what } = match command {
+        Ok(command) => command,
+        Err(why) => return ed.set_status(why),
+    };
+    let run = move |ed: &mut Editor, done: &str| {
+        ed.doc().clear_mark();
+        process::run(ed, root, args, stdin, done, |_| {});
+    };
     match action {
-        Action::Stage => process::run(ed, root, args, stdin, "Staged", |_| {}),
-        Action::Unstage => process::run(ed, root, args, stdin, "Unstaged", |_| {}),
+        Action::Stage => run(ed, "Staged"),
+        Action::Unstage => run(ed, "Unstaged"),
         Action::Discard => ed.confirm("git-discard", format!("Discard {}? (y/n) ", what), move |ed, yes| {
             if yes {
-                process::run(ed, root, args, stdin, "Discarded", |_| {});
+                run(ed, "Discarded");
             } else {
                 ed.set_status("Discard cancelled");
             }

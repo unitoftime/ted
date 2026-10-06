@@ -181,14 +181,42 @@ impl Hunk {
             .unwrap_or(1)
     }
 
-    /// Appends the hunk as it stands in a patch.
-    fn write(&self, out: &mut String) {
+    /// Appends the hunk cut down to the changes `picked` chooses by line, as a patch
+    /// applied forward or in `reverse` takes them alone: nothing, if it chooses none. A
+    /// change left out is written as the side being patched has it: as context where that
+    /// side has the line, not at all where it doesn't. The header keeps its line counts,
+    /// which is what `git apply --recount` is for. Returns whether a change left out
+    /// stays as context.
+    fn write_picked(&self, reverse: bool, picked: impl Fn(usize) -> bool, out: &mut String) -> bool {
+        // The sign of the changes whose lines the side being patched has.
+        let present = if reverse { b'+' } else { b'-' };
+        let start = out.len();
+        let (mut any, mut stays, mut written) = (false, false, true);
         out.push_str(&self.header);
         out.push('\n');
-        for line in &self.lines {
-            out.push_str(line);
+        for (l, line) in self.lines.iter().enumerate() {
+            let sign = line.as_bytes().first().copied();
+            let change = matches!(sign, Some(b'+' | b'-'));
+            // "\ No newline at end of file" goes with the line before it.
+            let taken = if sign == Some(b'\\') { written } else { !change || picked(l) };
+            written = taken || sign == Some(present);
+            if !written {
+                continue;
+            }
+            if taken {
+                out.push_str(line);
+                any |= change;
+            } else {
+                out.push(' ');
+                out.push_str(&line[1..]);
+                stays = true;
+            }
             out.push('\n');
         }
+        if !any {
+            out.truncate(start);
+        }
+        any && stays
     }
 }
 
@@ -225,30 +253,50 @@ impl FileDiff {
         self.from.as_deref().into_iter().chain([self.path.as_str()])
     }
 
-    /// A patch `git apply` accepts, for one hunk or (with `None`) the whole file. A
-    /// renamed file's patch renames it too.
-    pub fn patch(&self, hunk: Option<usize>) -> String {
+    /// The lines a patch of the file starts with: the header of its change, or `in_place`
+    /// that of a change to the file where it is now, which for a renamed file is under
+    /// its new path.
+    fn patch_header(&self, in_place: bool) -> String {
+        if in_place {
+            return format!("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n", self.path);
+        }
         let mut out = String::new();
         for line in &self.header {
             out.push_str(line);
             out.push('\n');
         }
-        let hunks = match hunk {
-            Some(i) => self.hunks.get(i..=i).unwrap_or_default(),
-            None => &self.hunks[..],
-        };
-        hunks.iter().for_each(|hunk| hunk.write(&mut out));
         out
     }
 
-    /// A patch of one hunk to the file where it is now, which for a renamed file is under
-    /// its new path: reversing it takes the hunk back and leaves the rename alone.
-    pub fn patch_in_place(&self, hunk: usize) -> String {
-        if self.from.is_none() {
-            return self.patch(Some(hunk));
+    /// A patch `git apply` accepts for the whole file. A renamed file's patch renames it
+    /// too.
+    pub fn patch(&self) -> String {
+        let mut out = self.patch_header(false);
+        for hunk in &self.hunks {
+            hunk.write_picked(false, |_| true, &mut out);
         }
-        let mut out = format!("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n", self.path);
-        self.hunks.get(hunk).into_iter().for_each(|hunk| hunk.write(&mut out));
+        out
+    }
+
+    /// A patch of the changes `picked` chooses, by hunk and line of it, for `git apply
+    /// --recount` to take alone, forward or in `reverse`: empty, if it chooses none.
+    ///
+    /// Applied forward, a renamed file's patch renames it too; in reverse it is a patch
+    /// to the file in place, which takes the changes back and leaves the rename alone.
+    /// So is any patch that leaves a change out as context: the file is then there on
+    /// both sides, even where the whole change adds or deletes it.
+    pub fn patch_picked(&self, reverse: bool, picked: impl Fn(usize, usize) -> bool) -> String {
+        let mut hunks = String::new();
+        let mut stays = false;
+        for (h, hunk) in self.hunks.iter().enumerate() {
+            stays |= hunk.write_picked(reverse, |l| picked(h, l), &mut hunks);
+        }
+        if hunks.is_empty() {
+            return hunks;
+        }
+        let in_place = if self.from.is_some() { reverse } else { stays };
+        let mut out = self.patch_header(in_place);
+        out.push_str(&hunks);
         out
     }
 }
@@ -502,8 +550,8 @@ mod tests {
         assert_eq!(files[0].hunks[0].lines[2], " ctx\r", "CR is preserved");
 
         let first_file = diff.split("diff --git a/new.txt").next().unwrap();
-        assert_eq!(files[0].patch(None), first_file);
-        assert!(files[0].patch(Some(1)).ends_with("@@ -10 +10,2 @@ fn f()\n x\n+y\n"));
+        assert_eq!(files[0].patch(), first_file);
+        assert!(files[0].patch_picked(false, |hunk, _| hunk == 1).ends_with("@@ -10 +10,2 @@ fn f()\n x\n+y\n"));
     }
 
     #[test]

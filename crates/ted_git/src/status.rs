@@ -260,11 +260,31 @@ pub fn visit(ed: &mut Editor) {
     }
 }
 
-/// `s` / `u` / `k`: stages, unstages or discards the section, file or hunk at point.
-/// Discarding a stash drops it.
+/// The lines of hunks among `items` (the rows a selection covers), with the section they
+/// are in: that of the first, when the selection runs on into another.
+fn selected_lines(items: &[Item]) -> Option<(Section, Vec<Line>)> {
+    let mut lines = items
+        .iter()
+        .filter_map(|item| match *item {
+            Item::Change(section, line @ Line::Body(..)) => Some((section, line)),
+            _ => None,
+        })
+        .peekable();
+    let section = lines.peek()?.0;
+    Some((section, lines.take_while(|(s, _)| *s == section).map(|(_, line)| line).collect()))
+}
+
+/// `s` / `u` / `k`: stages, unstages or discards the section, file or hunk at point, or
+/// the changed lines of hunks the selection covers. Discarding a stash drops it.
 pub fn act(ed: &mut Editor, action: Action) {
+    let selected = rows::in_region(ed).unwrap_or_default();
     let Some((root, item)) = at_point(ed) else { return };
-    let Some(status) = status_of(ed) else { return };
+    let Some(state) = ed.active_buffer().local::<StatusBuffer>() else { return };
+    let Some(status) = state.status.as_ref() else { return };
+    if let Some((section, lines)) = selected_lines(state.items.get(selected).unwrap_or_default()) {
+        let command = changes::command(action, Some(section), status.files(section), None, &lines);
+        return changes::run(ed, root, action, command);
+    }
     let command = match (action, item) {
         (Action::Stage, Item::Section(Section::Untracked)) => {
             let mut a = args(&["add", "--"]);
@@ -289,13 +309,12 @@ pub fn act(ed: &mut Editor, action: Action) {
         (Action::Discard, Item::Stash(i)) => {
             return crate::menus::drop_stash(ed, root, status.stashes[i].name.clone());
         }
-        (_, Item::Change(section, line)) => changes::command(action, Some(section), status.files(section), line),
+        (_, Item::Change(section, line)) => {
+            changes::command(action, Some(section), status.files(section), Some(line), &[])
+        }
         _ => Err(action.nothing_here()),
     };
-    match command {
-        Ok(command) => changes::run(ed, root, action, command),
-        Err(why) => ed.set_status(why),
-    }
+    changes::run(ed, root, action, command);
 }
 
 /// `git add` arguments staging every change in `unstaged`: `git add -u`, unless there are

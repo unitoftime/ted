@@ -2,7 +2,8 @@
 //! sections (`changes`): a heading per file with its hunks under it, under a commit's
 //! details or a title. `TAB` folds a file or hunk, `n` / `p` step between them, `RET`
 //! visits the line in the working tree, `s` / `u` / `k` stage, unstage or discard in
-//! diffs of unstaged or staged changes, and `g` reruns the diff.
+//! diffs of unstaged or staged changes (the file or hunk at point, or the changed lines a
+//! selection covers), and `g` reruns the diff.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -247,21 +248,20 @@ pub fn visit(ed: &mut Editor) {
     changes::visit(ed, &root, &path, line);
 }
 
-/// `s` / `u` / `k`: stages, unstages or discards the file or hunk at point, in a diff of
-/// unstaged or staged changes.
+/// `s` / `u` / `k`: stages, unstages or discards the file or hunk at point, or the changed
+/// lines of hunks the selection covers, in a diff of unstaged or staged changes.
 pub fn act(ed: &mut Editor, action: Action) {
-    let Some((state, line)) = at_point(ed) else {
+    let selected = rows::in_region(ed).unwrap_or_default();
+    let Some(state) = ed.active_buffer().local::<DiffBuffer>() else {
         ed.set_status(action.nothing_here());
         return;
     };
     let section = state.source.as_ref().and_then(Source::section);
-    match changes::command(action, section, &state.files, line) {
-        Ok(command) => {
-            let root = ed.active_buffer().directory();
-            changes::run(ed, root, action, command);
-        }
-        Err(why) => ed.set_status(why),
-    }
+    let at = at_point(ed).map(|(_, line)| line);
+    let selected = state.lines.get(selected).unwrap_or_default();
+    let command = changes::command(action, section, &state.files, at, selected);
+    let root = ed.active_buffer().directory();
+    changes::run(ed, root, action, command);
 }
 
 /// `d d`: the diff of whatever is at point in the status buffer.

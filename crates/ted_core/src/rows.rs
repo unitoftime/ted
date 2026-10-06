@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Range;
 
 use crate::buffer::{Buffer, BufferId, Decoration, Place, StyledText};
 use crate::commands::motion;
@@ -246,6 +247,15 @@ impl RowText {
 pub fn at_point(ed: &Editor) -> Option<usize> {
     let buf = ed.active_buffer();
     buf.local::<Rows>()?.at_line(buf.char_to_line(ed.active_view().cursor.pos))
+}
+
+/// The rows the region in the active window touches, if it has one and its buffer has rows.
+pub fn in_region(ed: &mut Editor) -> Option<Range<usize>> {
+    let doc = ed.doc();
+    doc.region()?;
+    let lines = doc.region_lines();
+    let rows = &doc.buf.local::<Rows>()?.rows;
+    Some(rows.partition_point(|r| r.line < lines.start)..rows.partition_point(|r| r.line < lines.end))
 }
 
 /// Moves point in the active window to the row whose item has `key`, if there is one.
