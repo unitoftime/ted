@@ -1,10 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- Colors come from ted's default theme (theme.rs): background, mode-line, text, cursor. -->
-  <clipPath id="tile"><rect x="16" y="16" width="224" height="224" rx="48"/></clipPath>
-  <g clip-path="url(#tile)">
-    <rect x="16" y="16" width="224" height="224" fill="#2e3436"/>
-    <rect x="16" y="196" width="224" height="44" fill="#204a87"/>
-  </g>
-  <path d="M100 58 V136 Q100 162 128 162 H140 M72 92 H138" fill="none" stroke="#eeeeec" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="158" y="98" width="34" height="66" fill="#f57900"/>
+  <!-- The t is Nimbus Mono PS Bold's, as an outline, in the background color of ted's default theme (theme.rs). -->
+  <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d3d7cf"/></linearGradient>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#paper)"/>
+  <rect x="17.5" y="17.5" width="221" height="221" rx="50.5" fill="none" stroke="#ffffff" stroke-opacity="0.16" stroke-width="3"/>
+  <path transform="translate(9.25 21.73) scale(0.2521)" fill="#2e3436" d="M 418 378 L 595 378 C 641 378 665 361 665 326 C 665 310 657 294 643 284 C 632 277 623 275 595 275 L 418 275 L 418 195 C 418 170 417 162 410 152 C 400 137 383 128 364 128 C 347 128 331 136 320 149 C 312 159 310 169 310 195 L 310 275 L 279 275 C 252 275 245 276 235 282 C 219 291 209 309 209 326 C 209 343 217 358 231 368 C 241 375 254 378 279 378 L 310 378 L 310 580 C 310 663 382 715 499 715 C 553 715 631 699 680 677 C 720 659 733 646 733 621 C 733 592 710 569 681 569 C 669 569 663 571 644 580 C 600 601 552 612 500 612 C 463 612 436 606 425 594 C 420 589 418 580 418 561 Z"/>
 </svg>
