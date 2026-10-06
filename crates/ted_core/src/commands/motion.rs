@@ -25,8 +25,12 @@ pub fn register(ed: &mut Editor) {
     c.register("end-of-buffer", "Move point to end of buffer", |ed, _| motion(ed, |d| d.move_buffer_end()));
     c.register("forward-word", "Move point forward one word", |ed, _| motion(ed, |d| d.move_word_forward()));
     c.register("backward-word", "Move point backward one word", |ed, _| motion(ed, |d| d.move_word_backward()));
-    c.register("scroll-down", "Move point down one page", |ed, _| motion(ed, |d| d.move_page(1)));
-    c.register("scroll-up", "Move point up one page", |ed, _| motion(ed, |d| d.move_page(-1)));
+    c.register("scroll-down", "Scroll down one page, point staying on its screen line", |ed, _| {
+        motion(ed, |d| d.move_page(1))
+    });
+    c.register("scroll-up", "Scroll up one page, point staying on its screen line", |ed, _| {
+        motion(ed, |d| d.move_page(-1))
+    });
 
     c.register_hidden("mouse-set-point", "Move point to the mouse", |ed, arg| {
         let Some((x, y)) = arg.point() else { return };
@@ -98,6 +102,5 @@ fn goto_line(ed: &mut Editor, input: String) {
     let mut doc = ed.doc();
     let last = doc.buf.len_lines().saturating_sub(1);
     let pos = doc.buf.point_to_char(line.saturating_sub(1).min(last), col.saturating_sub(1));
-    doc.set_cursor(pos);
-    doc.reveal();
+    doc.jump_to(pos);
 }

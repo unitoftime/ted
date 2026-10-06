@@ -20,6 +20,9 @@ pub enum RecenterTarget {
     Center,
     Top,
     Bottom,
+    /// A third of the way down: where a jump lands, with more in view of what follows
+    /// the line than of what leads up to it.
+    Third,
 }
 
 impl<'a> Doc<'a> {
@@ -141,8 +144,21 @@ impl<'a> Doc<'a> {
         }
     }
 
+    /// Visual rows from `from` down to `to`.
+    fn rows_between(&self, from: (usize, usize), to: (usize, usize)) -> usize {
+        (from.0..to.0).map(|line| self.line_rows(line, usize::MAX)).sum::<usize>() + to.1 - from.1
+    }
+
     fn top(&self) -> (usize, usize) {
         (self.view.top_line, self.view.top_row)
+    }
+
+    /// The top that shows the buffer's last row on the window's last: as far down as
+    /// paging scrolls.
+    fn last_top(&self) -> (usize, usize) {
+        let line = self.buf.len_lines().saturating_sub(1);
+        let end = (line, self.line_rows(line, usize::MAX) - 1);
+        self.step_rows(end, -(self.view.text_rows() as isize - 1))
     }
 
     fn set_top(&mut self, (line, row): (usize, usize)) {
@@ -173,13 +189,15 @@ impl<'a> Doc<'a> {
         }
     }
 
-    /// Brings the cursor into view after a jump: left alone if it is on screen, centered
-    /// otherwise.
-    pub fn reveal(&mut self) {
-        let before = (self.top(), self.view.left_col);
+    /// Moves the cursor to `pos` as a jump: to another place, rather than along the text.
+    /// Its line lands a third of the way down the window. A jump within the cursor's own
+    /// line scrolls nothing when that line is on screen.
+    pub fn jump_to(&mut self, pos: usize) {
+        let from = (self.buf.char_to_line(self.pos()), self.top());
+        self.set_cursor(pos);
         self.ensure_cursor_visible();
-        if (self.top(), self.view.left_col) != before {
-            self.recenter(RecenterTarget::Center);
+        if (self.buf.char_to_line(self.pos()), self.top()) != from {
+            self.recenter(RecenterTarget::Third);
         }
     }
 
@@ -191,6 +209,7 @@ impl<'a> Doc<'a> {
             RecenterTarget::Center => text_rows / 2,
             RecenterTarget::Top => 0,
             RecenterTarget::Bottom => text_rows - 1,
+            RecenterTarget::Third => text_rows / 3,
         };
         self.set_top(self.step_rows((line, row), -(target_row as isize)));
     }
@@ -252,8 +271,20 @@ impl<'a> Doc<'a> {
         self.view.cursor.goal_col = Some(goal);
     }
 
+    /// Pages down (`direction` 1) or up (-1): the text scrolls by a window and the cursor
+    /// with it, staying on its screen row. Where the text has less than that left to
+    /// scroll it scrolls what it has, and where it has none the cursor moves on alone.
     pub fn move_page(&mut self, direction: isize) {
-        self.move_rows(direction * self.view.text_rows() as isize);
+        self.ensure_cursor_visible();
+        let page = direction * self.view.text_rows() as isize;
+        let top = self.top();
+        let to = self.step_rows(top, page);
+        let to = if direction > 0 { to.min(self.last_top().max(top)) } else { to };
+        if to == top {
+            return self.move_rows(page);
+        }
+        self.set_top(to);
+        self.move_rows(direction * self.rows_between(top.min(to), top.max(to)) as isize);
     }
 
     pub fn move_line_start(&mut self) {

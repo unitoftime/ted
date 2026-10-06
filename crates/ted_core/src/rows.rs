@@ -291,7 +291,9 @@ fn step(ed: &mut Editor, forward: bool) {
     let line = buf.char_to_line(ed.active_view().cursor.pos);
     if let Some(row) = rows.step(Some(line), forward) {
         let pos = rows.point(buf, row);
-        motion(ed, |d| d.set_cursor(pos));
+        // Over rows that do not stop, the step is a jump to the next heading.
+        let jumps = rows.at_line(line).is_some_and(|from| from.abs_diff(row) > 1);
+        motion(ed, |d| if jumps { d.jump_to(pos) } else { d.set_cursor(pos) });
     }
 }
 

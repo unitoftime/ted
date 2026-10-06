@@ -240,7 +240,6 @@ fn show_mark(ed: &mut Editor, mark: &Mark) -> bool {
     let mut doc = ed.doc();
     let pos = mark.pos.min(doc.buf.len_chars());
     doc.clear_mark();
-    doc.set_cursor(pos);
-    doc.reveal();
+    doc.jump_to(pos);
     true
 }

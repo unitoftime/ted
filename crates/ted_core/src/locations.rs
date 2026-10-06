@@ -311,7 +311,6 @@ pub fn visit(ed: &mut Editor, location: &Location) -> bool {
     let mut doc = ed.doc();
     let pos = doc.buf.point_to_char(location.line, location.col);
     doc.clear_mark();
-    doc.set_cursor(pos);
-    doc.reveal();
+    doc.jump_to(pos);
     true
 }

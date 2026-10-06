@@ -155,7 +155,7 @@ pub fn visit(ed: &mut Editor, root: &Path, path: &str, line: usize) {
     }
     let mut doc = ed.doc();
     let pos = doc.buf.line_to_char(line.min(doc.buf.len_lines() - 1));
-    doc.set_cursor(pos);
+    doc.jump_to(pos);
 }
 
 /// What `s`, `u` and `k` do.
