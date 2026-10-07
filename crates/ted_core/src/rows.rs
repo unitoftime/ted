@@ -18,6 +18,7 @@ use std::ops::Range;
 
 use crate::buffer::{Buffer, BufferId, Decoration, Place, StyledText};
 use crate::commands::motion;
+use crate::doc::Rejoin;
 use crate::editor::Editor;
 use crate::face::FaceId;
 
@@ -291,14 +292,22 @@ fn draw_marks(buf: &mut Buffer) {
     buf.decorations_mut().set(MARKS, decorations);
 }
 
+/// The line `n` / `p` step from in the active window: the cursor's, back among the text
+/// in view if scrolling left it off screen.
+pub(crate) fn step_origin(ed: &mut Editor) -> usize {
+    let mut doc = ed.doc();
+    doc.rejoin_view(Rejoin::Nearest);
+    doc.buf.char_to_line(doc.pos())
+}
+
 /// `n` / `p`: moves to the next or previous row that stops, else by a line.
 fn step(ed: &mut Editor, forward: bool) {
+    let line = step_origin(ed);
     let buf = ed.active_buffer();
     let Some(rows) = buf.local::<Rows>().filter(|rows| !rows.is_empty()) else {
         motion(ed, |d| d.move_rows(if forward { 1 } else { -1 }));
         return;
     };
-    let line = buf.char_to_line(ed.active_view().cursor.pos);
     if let Some(row) = rows.step(Some(line), forward) {
         let pos = rows.point(buf, row);
         // Over rows that do not stop, the step is a jump to the next heading.

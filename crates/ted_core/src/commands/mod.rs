@@ -13,7 +13,7 @@ pub mod search;
 pub mod undo_tree;
 pub mod windows;
 
-use crate::doc::Doc;
+use crate::doc::{Doc, Rejoin};
 use crate::editor::Editor;
 
 pub(crate) fn register_builtin(ed: &mut Editor) {
@@ -37,10 +37,12 @@ pub(crate) fn register_builtin(ed: &mut Editor) {
 }
 
 /// Runs a cursor motion with shift-selection semantics: a shift-translated key extends the
-/// selection, an unshifted one ends a shift selection.
+/// selection, an unshifted one ends a shift selection. A cursor that scrolling left off
+/// screen first rejoins the window, so the motion sets off from the text in view.
 pub fn motion(ed: &mut Editor, f: impl FnOnce(&mut Doc)) {
     let shift = ed.shift_translated();
     let mut doc = ed.focused_doc();
+    doc.rejoin_view(Rejoin::Nearest);
     doc.begin_motion(shift);
     f(&mut doc);
 }

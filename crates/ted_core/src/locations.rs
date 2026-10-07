@@ -255,8 +255,8 @@ fn step_current(ed: &mut Editor, forward: bool) {
 /// `n` / `p` in a list buffer: steps from the cursor line without visiting.
 fn step_here(ed: &mut Editor, forward: bool) {
     let id = ed.active_buffer_id();
+    let line = rows::step_origin(ed);
     let buf = ed.active_buffer();
-    let line = buf.char_to_line(ed.active_view().cursor.pos);
     let rows = buf.local::<Rows>().filter(|_| buf.local::<LocationList>().is_some());
     match rows.and_then(|rows| rows.step(Some(line), forward)) {
         Some(index) => {

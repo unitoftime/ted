@@ -190,10 +190,10 @@ fn test_unfocused_window_shows_unfilled_cursor_box() {
     assert_eq!(outline_rects(&frame), 4, "Unfocused cursor draws 4 outline edges");
 }
 
-/// The wheel scrolls the view away from the cursor; the view follows the cursor again
-/// once it moves.
+/// The wheel scrolls the view away from the cursor. Motions and searches then set off from
+/// the text in view, while typing goes on where the cursor was left.
 #[test]
-fn test_wheel_scroll_leaves_the_cursor_until_it_moves() {
+fn test_wheel_scroll_leaves_the_cursor_until_it_is_used() {
     let text: String = (0..200).map(|i| format!("line {}\n", i)).collect();
     let mut editor = editor_with(&text, None);
     let mut frame = Frame::new(800.0, 400.0, Color::BLACK);
@@ -207,7 +207,38 @@ fn test_wheel_scroll_leaves_the_cursor_until_it_moves() {
     }
     assert_eq!(editor.active_view().cursor.pos, 0);
 
-    editor.handle_key(KeyEvent::ctrl('n'));
-    editor.render(&mut frame, Metrics::new(8.0, 20.0));
-    assert_eq!(editor.active_view().top_line, 1);
+    let cursor_line = |ed: &Editor| ed.active_buffer().char_to_line(ed.active_view().cursor.pos);
+    let mut press = |ed: &mut Editor, key: KeyEvent| {
+        ed.handle_key(key);
+        ed.render(&mut frame, Metrics::new(8.0, 20.0));
+    };
+
+    // A motion leaves from the window's nearest row.
+    press(&mut editor, KeyEvent::ctrl('n'));
+    assert_eq!((cursor_line(&editor), editor.active_view().top_line), (10, 9));
+
+    // A forward search covers the window from its first row, and C-g puts the view back.
+    editor.handle_scroll(x, y, 40);
+    press(&mut editor, KeyEvent::ctrl('s'));
+    for ch in "line 5".chars() {
+        press(&mut editor, KeyEvent::plain_char(ch));
+    }
+    assert_eq!(cursor_line(&editor), 50);
+    press(&mut editor, KeyEvent::ctrl('g'));
+    assert_eq!((cursor_line(&editor), editor.active_view().top_line), (49, 49));
+
+    // A backward search leaves from its last row.
+    editor.handle_scroll(x, y, 40);
+    let last_row = editor.active_view().top_line + editor.active_view().text_rows() - 1;
+    press(&mut editor, KeyEvent::ctrl('r'));
+    press(&mut editor, KeyEvent::plain_char('l'));
+    assert_eq!(cursor_line(&editor), last_row);
+    press(&mut editor, KeyEvent::plain(KeyCode::Enter));
+
+    // Typing goes on at the cursor, and the view returns to it.
+    editor.handle_scroll(x, y, 40);
+    press(&mut editor, KeyEvent::plain_char('x'));
+    assert_eq!(cursor_line(&editor), last_row);
+    assert!(editor.active_buffer().line_content(last_row).to_string().starts_with('x'));
+    assert!(editor.active_view().top_line <= last_row);
 }

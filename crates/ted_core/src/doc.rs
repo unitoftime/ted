@@ -25,6 +25,17 @@ pub enum RecenterTarget {
     Third,
 }
 
+/// Where a cursor that scrolling left off screen rejoins the window (`Doc::rejoin_view`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejoin {
+    /// On the nearest row, in its column: where a motion sets off from.
+    Nearest,
+    /// At the start of the first row, so a forward search covers the text in view.
+    Top,
+    /// At the end of the last row, for a backward search.
+    Bottom,
+}
+
 impl<'a> Doc<'a> {
     pub fn new(view: &'a mut View, buf: &'a mut Buffer) -> Self {
         Self { view, buf }
@@ -149,7 +160,8 @@ impl<'a> Doc<'a> {
         (from.0..to.0).map(|line| self.line_rows(line, usize::MAX)).sum::<usize>() + to.1 - from.1
     }
 
-    fn top(&self) -> (usize, usize) {
+    /// The line and its visual row shown first.
+    pub fn top(&self) -> (usize, usize) {
         (self.view.top_line, self.view.top_row)
     }
 
@@ -161,7 +173,8 @@ impl<'a> Doc<'a> {
         self.step_rows(end, -(self.view.text_rows() as isize - 1))
     }
 
-    fn set_top(&mut self, (line, row): (usize, usize)) {
+    /// Scrolls to show visual `row` of `line` first.
+    pub fn set_top(&mut self, (line, row): (usize, usize)) {
         (self.view.top_line, self.view.top_row) = (line, row);
     }
 
@@ -219,6 +232,32 @@ impl<'a> Doc<'a> {
     pub fn scroll(&mut self, delta_rows: isize) {
         self.view.scrolled_from = Some(self.pos());
         self.set_top(self.step_rows(self.top(), delta_rows));
+    }
+
+    /// Brings a cursor that `scroll` left off screen back into the window at `at`, so a
+    /// motion or search sets off from the text in view. Typing doesn't: it goes on where
+    /// the cursor was left.
+    pub fn rejoin_view(&mut self, at: Rejoin) {
+        if self.view.scrolled_from != Some(self.pos()) {
+            return;
+        }
+        let (line, row, col) = self.visual_pos(self.pos());
+        let top = self.top();
+        let bottom = self.step_rows(top, self.view.text_rows() as isize - 1);
+        if (top..=bottom).contains(&(line, row)) {
+            return;
+        }
+        self.view.scrolled_from = None;
+        match at {
+            Rejoin::Nearest => {
+                let goal = self.view.cursor.goal_col.unwrap_or(col);
+                let (line, row) = if (line, row) < top { top } else { bottom };
+                self.view.cursor.pos = self.pos_at_visual(line, row, goal);
+                self.view.cursor.goal_col = Some(goal);
+            }
+            Rejoin::Top => self.set_cursor(self.pos_at_visual(top.0, top.1, 0)),
+            Rejoin::Bottom => self.set_cursor(self.pos_at_visual(bottom.0, bottom.1, usize::MAX)),
+        }
     }
 
     /// Buffer position under screen point (`x`, `y`), using the last rendered geometry.

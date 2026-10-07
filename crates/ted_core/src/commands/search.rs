@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::doc::Rejoin;
 use crate::editor::Editor;
 use crate::grep;
 use crate::keymap::KeymapId;
@@ -29,21 +30,27 @@ const MIN_QUERY_CHARS: usize = 2;
 /// through matches, RET keeps the position, C-g returns to the start. Keys the search
 /// doesn't use (C-n, C-v, M-x, ...) keep the position too, then do what they normally do.
 /// The query joins the search history once C-s/C-r steps with it or RET ends the search.
+///
+/// It starts from the text in view: a cursor that scrolling left off screen first rejoins
+/// the window, at the edge the search leaves from. Each match is a jump.
 pub struct Search {
     input: LineInput,
     history: HistoryCursor,
+    /// Point and the window's top when the search started.
     start: usize,
+    top: (usize, usize),
     forward: bool,
     failing: bool,
     label: String,
 }
 
 impl Search {
-    fn new(start: usize, forward: bool) -> Self {
+    fn new(start: usize, top: (usize, usize), forward: bool) -> Self {
         let mut s = Self {
             input: LineInput::default(),
             history: HistoryCursor::default(),
             start,
+            top,
             forward,
             failing: false,
             label: String::new(),
@@ -70,10 +77,18 @@ impl Search {
         let mut doc = ed.doc();
         doc.view.highlight = Some(query);
         if let Some(pos) = found {
-            doc.set_cursor(pos);
+            doc.jump_to(pos);
         }
         self.failing = found.is_none();
         self.update_label();
+    }
+
+    /// Puts point and the window back where the search started, without the highlight.
+    fn restore_start(&self, ed: &mut Editor) {
+        let mut doc = ed.doc();
+        doc.set_cursor(self.start);
+        doc.set_top(self.top);
+        doc.view.highlight = None;
     }
 
     /// C-s / C-r: next match in `forward` direction, recalling the last search if empty.
@@ -127,9 +142,7 @@ impl Modal for Search {
 
     fn input_changed(&mut self, ed: &mut Editor) {
         if self.input.text().is_empty() {
-            let mut doc = ed.doc();
-            doc.set_cursor(self.start);
-            doc.view.highlight = None;
+            self.restore_start(ed);
             self.failing = false;
             self.update_label();
             return;
@@ -138,9 +151,7 @@ impl Modal for Search {
     }
 
     fn cancel(self: Box<Self>, ed: &mut Editor) {
-        let mut doc = ed.doc();
-        doc.set_cursor(self.start);
-        doc.view.highlight = None;
+        self.restore_start(ed);
     }
 }
 
@@ -208,7 +219,9 @@ fn exit(ed: &mut Editor) {
 }
 
 fn start(ed: &mut Editor, forward: bool) {
-    let search = Search::new(ed.doc().pos(), forward);
+    let mut doc = ed.doc();
+    doc.rejoin_view(if forward { Rejoin::Top } else { Rejoin::Bottom });
+    let search = Search::new(doc.pos(), doc.top(), forward);
     ed.push_modal(search);
 }
 
