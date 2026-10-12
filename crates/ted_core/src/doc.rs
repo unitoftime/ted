@@ -731,6 +731,7 @@ impl<'a> Doc<'a> {
         let prefix = self.buf.mode().comment_prefix.clone();
         let bare = prefix.trim();
         let lines = self.region_lines();
+        self.clear_mark();
         let (first, last) = (lines.start, lines.end - 1);
 
         let lines: Vec<String> = (first..=last).map(|l| self.buf.line_content(l).to_string()).collect();
