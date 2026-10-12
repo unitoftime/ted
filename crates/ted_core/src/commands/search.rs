@@ -264,10 +264,13 @@ fn replace(ed: &mut Editor, target: &str, replacement: &str) {
         ed.set_status("Buffer is read-only");
         return;
     }
-    let mut doc = ed.doc();
-    let cursor = doc.pos();
-    let count = doc.buf.replace_all(target, replacement, None, cursor);
-    doc.set_cursor(cursor);
+    let count = ed.edit_in_active_view(|ed| {
+        let mut doc = ed.doc();
+        let cursor = doc.pos();
+        let count = doc.buf.replace_all(target, replacement, None, cursor);
+        doc.set_cursor(cursor);
+        count
+    });
     ed.input_history.record(REPLACE_PAIRS, &format!("{}{}{}", target, PAIR_SEPARATOR, replacement));
     ed.set_status(format!("Replaced {} occurrence(s) of '{}' with '{}'", count, target, replacement));
 }

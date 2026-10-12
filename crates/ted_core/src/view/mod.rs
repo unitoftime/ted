@@ -8,7 +8,7 @@ use std::ops::Range;
 pub use render::{BufferRenderer, RenderCtx};
 pub use visual::{rows_for_width, DisplayLine, ScreenLine, VisualLine, NO_WRAP, WIDE_CONTINUATION};
 
-use crate::buffer::{BufferId, Buffers, Place};
+use crate::buffer::{Buffer, BufferId, Buffers, Place};
 use crate::frame::{Metrics, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -176,6 +176,18 @@ impl View {
     /// scrolling too; this is for views of buffers updated in the background).
     pub fn goto(&mut self, pos: usize) {
         self.cursor = Cursor { pos, ..Cursor::default() };
+    }
+
+    /// Moves the cursor, the mark, the place scrolling left the cursor at and the scroll
+    /// to where `map` puts them in `buf`, whose text changed under the view. `top` is
+    /// where the first line shown started before the change: its number alone can't be
+    /// carried through one.
+    pub(crate) fn map_positions(&mut self, buf: &Buffer, top: usize, map: impl Fn(usize) -> usize) {
+        self.cursor.pos = map(self.cursor.pos);
+        self.cursor.mark = self.cursor.mark.map(&map);
+        self.cursor.goal_col = None;
+        self.scrolled_from = self.scrolled_from.map(&map);
+        self.top_line = buf.char_to_line(map(top));
     }
 
     /// Keeps the cursor, mark and scroll inside a buffer of `len_chars` chars and

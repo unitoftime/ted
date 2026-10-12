@@ -1,6 +1,7 @@
 //! Batches of edits applied together: what formatters, renames and completions hand back.
 
 use std::ops::Range;
+use std::slice;
 
 use super::Buffer;
 
@@ -31,6 +32,14 @@ pub fn map_pos(edits: &[Edit], pos: usize) -> usize {
         shifted += new_len as isize - edit.range.len() as isize;
     }
     shifted as usize
+}
+
+/// Where `pos` ends up after `edits`, each made to the text the one before it left (as
+/// `Buffer::changes_since` gives them), for a position held somewhere other than where
+/// they were made: unlike with `map_pos`, text inserted right at it goes after it, so
+/// typing in one window doesn't push along a cursor resting there in another.
+pub fn follow_pos<'e>(edits: impl Iterator<Item = &'e Edit>, pos: usize) -> usize {
+    edits.fold(pos, |pos, edit| if pos <= edit.range.start { pos } else { map_pos(slice::from_ref(edit), pos) })
 }
 
 impl Buffer {

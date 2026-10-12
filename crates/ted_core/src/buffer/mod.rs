@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use ropey::{Rope, RopeSlice};
 
 pub use decorations::{Decoration, Decorations};
-pub use edits::{map_pos, Edit};
+pub use edits::{follow_pos, map_pos, Edit};
 pub use history::{EditGroup, EditKind, TreeDisplayLine, UndoNode, UndoTree};
 pub use styled::StyledText;
 
@@ -329,7 +329,7 @@ impl Buffer {
     /// The changes since `version`, in order, each in the text as it was just before it:
     /// replayed on the text of `version`, they give the current text. `None` once they
     /// are no longer all remembered.
-    pub fn changes_since(&self, version: u64) -> Option<impl ExactSizeIterator<Item = &Edit>> {
+    pub fn changes_since(&self, version: u64) -> Option<impl ExactSizeIterator<Item = &Edit> + Clone> {
         self.journal.since(version, self.version)
     }
 

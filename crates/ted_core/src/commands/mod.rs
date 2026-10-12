@@ -47,11 +47,11 @@ pub fn motion(ed: &mut Editor, f: impl FnOnce(&mut Doc)) {
     f(&mut doc);
 }
 
-/// Runs an edit on the focused doc, refusing (with a message) in read-only buffers.
+/// Runs an edit on the focused doc, refusing (with a message) in read-only buffers. Other
+/// windows showing its buffer keep their place in the text.
 pub fn edit<R>(ed: &mut Editor, f: impl FnOnce(&mut Doc) -> R) -> Option<R> {
-    let mut doc = ed.focused_doc();
-    if !doc.buf.is_read_only() {
-        return Some(f(&mut doc));
+    if !ed.focused_doc().buf.is_read_only() {
+        return Some(ed.edit_in_active_view(|ed| f(&mut ed.focused_doc())));
     }
     ed.set_status("Buffer is read-only");
     None

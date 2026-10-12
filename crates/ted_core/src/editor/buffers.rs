@@ -5,10 +5,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::buffer::{map_pos, Buffer, BufferId, Edit, Place};
+use crate::buffer::{follow_pos, map_pos, Buffer, BufferId, Edit, Place};
 use crate::editor::Editor;
+use crate::layout::Layout;
 use crate::plugin::{Hooks, SaveToken};
 use crate::text::{absolutize, collapse_tilde};
+use crate::view::ViewId;
 
 /// How long a save waits for `before_save` hooks (a formatter) before writing anyway.
 const SAVE_HOOK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -40,6 +42,16 @@ struct FilePlaces(HashMap<PathBuf, Place>);
 struct Saves {
     serial: u64,
     pending: HashMap<u64, PendingSave>,
+}
+
+/// Moves the windows of `tops` (`Editor::top_anchors`, taken before `buf`'s text changed)
+/// to where `map` puts their positions in it.
+fn carry_views(layout: &mut Layout, buf: &Buffer, tops: Vec<(ViewId, usize)>, map: impl Fn(usize) -> usize) {
+    for (view, top) in tops {
+        if let Some(view) = layout.view_mut(view) {
+            view.map_positions(buf, top, &map);
+        }
+    }
 }
 
 impl Editor {
@@ -255,18 +267,42 @@ impl Editor {
     }
 
     /// Applies `edits` to buffer `id` as one undo step (see `Buffer::apply_edits`), moving
-    /// the cursor and mark of every window showing it along with the text.
+    /// the cursor, mark and scroll of every window showing it along with the text.
     pub fn apply_edits(&mut self, id: BufferId, mut edits: Vec<Edit>) -> Result<(), String> {
         let active = self.layout.active();
         let cursor = if active.buffer == id { active.cursor.pos } else { 0 };
+        let tops = self.top_anchors(id, None);
         self.buffers[id].apply_edits(&mut edits, cursor)?;
-        for view in self.layout.views_showing(id) {
-            let cursor = &mut view.cursor;
-            cursor.pos = map_pos(&edits, cursor.pos);
-            cursor.mark = cursor.mark.map(|mark| map_pos(&edits, mark));
-            cursor.goal_col = None;
-        }
+        carry_views(&mut self.layout, &self.buffers[id], tops, |pos| map_pos(&edits, pos));
         Ok(())
+    }
+
+    /// Runs `f`, which edits the active buffer through the active window, and keeps the
+    /// other windows showing that buffer on the text they were on: their cursors, marks
+    /// and scroll move along with what `f` changed.
+    pub fn edit_in_active_view<R>(&mut self, f: impl FnOnce(&mut Editor) -> R) -> R {
+        let active = self.layout.active();
+        let (editing, id) = (active.id(), active.buffer);
+        let since = self.buffers[id].version();
+        let tops = self.top_anchors(id, Some(editing));
+        let result = f(self);
+        let Some(buf) = self.buffers.get(id).filter(|b| b.version() != since) else {
+            return result;
+        };
+        match buf.changes_since(since) {
+            Some(edits) => carry_views(&mut self.layout, buf, tops, |pos| follow_pos(edits.clone(), pos)),
+            // More changed than is remembered: they just stay inside the text.
+            None => carry_views(&mut self.layout, buf, tops, |pos| pos.min(buf.len_chars())),
+        }
+        result
+    }
+
+    /// The windows showing `id` (all but `except`), each with where its first line starts:
+    /// what `carry_views` moves their scroll by once the text changed.
+    fn top_anchors(&self, id: BufferId, except: Option<ViewId>) -> Vec<(ViewId, usize)> {
+        let buf = &self.buffers[id];
+        let showing = self.layout.views().into_iter().filter(|v| v.buffer == id && Some(v.id()) != except);
+        showing.map(|v| (v.id(), buf.line_to_char(v.top_line))).collect()
     }
 
     /// Kills `id` (without asking), showing another buffer wherever it was displayed.

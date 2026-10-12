@@ -47,7 +47,7 @@ impl Journal {
     }
 
     /// The edits from `version` up to `current`, if all are still recorded.
-    pub fn since(&self, version: u64, current: u64) -> Option<impl ExactSizeIterator<Item = &Edit>> {
+    pub fn since(&self, version: u64, current: u64) -> Option<impl ExactSizeIterator<Item = &Edit> + Clone> {
         let skip = usize::try_from(version.checked_sub(self.base)?).ok()?;
         let complete = self.base + self.edits.len() as u64 == current;
         (complete && skip <= self.edits.len()).then(|| self.edits.range(skip..))

@@ -101,7 +101,7 @@ fn switch_branch(doc: &mut Doc, delta: isize) -> bool {
 }
 
 fn step(ed: &mut Editor, f: impl FnOnce(&mut Doc) -> bool) {
-    if f(&mut ed.doc()) {
+    if ed.edit_in_active_view(|ed| f(&mut ed.doc())) {
         report_revision(ed, "Undo tree");
     }
     ed.set_chain(UndoChain);
