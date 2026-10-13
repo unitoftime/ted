@@ -106,6 +106,7 @@ impl Plugin for LspPlugin {
         ed.hooks.on_file_visited(client::file_visited);
         ed.hooks.on_buffer_saved(client::did_save);
         ed.hooks.on_buffer_killed(client::detach);
+        ed.hooks.on_quit(client::quitting);
         ed.hooks.on_post_command(diagnostics::echo);
         ed.add_timer(SYNC_TICK, client::sync_idle);
         chain::register(ed, 100, xref::LspBackend);

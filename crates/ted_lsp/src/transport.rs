@@ -9,7 +9,7 @@
 use std::io::{self, BufReader, BufWriter, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use ropey::Rope;
@@ -99,22 +99,22 @@ impl Transport {
     }
 
     /// Asks the server to exit and stops listening to it. A server that doesn't exit
-    /// promptly is killed.
-    pub fn shutdown(self) {
+    /// promptly is killed. The returned thread ends once the process is gone and reaped.
+    pub fn shutdown(self) -> JoinHandle<()> {
         let Self { tx, mut child, job } = self;
         job.cancel();
         let _ = tx.send(Outgoing::request(i64::MAX, "shutdown", Value::Null));
         let _ = tx.send(Outgoing::notification("exit", Value::Null));
         thread::spawn(move || {
-            for _ in 0..20 {
+            for _ in 0..200 {
                 if let Ok(Some(_)) = child.try_wait() {
                     return;
                 }
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(10));
             }
             let _ = child.kill();
             let _ = child.wait();
-        });
+        })
     }
 }
 

@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
 
 use ropey::Rope;
 use serde_json::{json, Value};
@@ -126,6 +127,8 @@ pub struct Lsp {
     pub docs: HashMap<BufferId, Document>,
     /// Servers that failed to start, by (language, root); not retried until `lsp-restart`.
     failed: HashSet<(&'static str, PathBuf)>,
+    /// Threads seeing stopped servers out, until their processes are gone.
+    stopping: Vec<JoinHandle<()>>,
 }
 
 /// A document whose server is ready for requests.
@@ -411,15 +414,32 @@ pub fn restart(ed: &mut Editor) {
 /// Shuts `server` down and fails its outstanding requests, so waiting commands move on.
 fn stop(ed: &mut Editor, server: ServerId) {
     watched_files::unwatch(ed, server);
-    let Some(client) = ed.ext_mut::<Lsp>().clients.get_mut(server) else {
+    let lsp = ed.ext_mut::<Lsp>();
+    let Some(client) = lsp.clients.get_mut(server) else {
         return;
     };
     client.state = State::Exited;
     if let Some(transport) = client.transport.take() {
-        transport.shutdown();
+        lsp.stopping.retain(|reaper| !reaper.is_finished());
+        lsp.stopping.push(transport.shutdown());
     }
     for (_, callback) in mem::take(&mut client.pending) {
         callback(ed, Err("language server stopped".to_string()));
+    }
+}
+
+/// As the editor stops to restart: shuts every server down and waits until its process is
+/// gone. The restarted ted is this same process, so a server that outlived the restart
+/// would stay its child and never be reaped. A ted that exits leaves its servers to init.
+pub fn quitting(ed: &mut Editor) {
+    if ed.restart.is_none() {
+        return;
+    }
+    for server in 0..ed.ext_mut::<Lsp>().clients.len() {
+        stop(ed, server);
+    }
+    for reaper in mem::take(&mut ed.ext_mut::<Lsp>().stopping) {
+        let _ = reaper.join();
     }
 }
 
