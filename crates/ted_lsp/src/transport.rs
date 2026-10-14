@@ -10,11 +10,10 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use ropey::Rope;
 use serde_json::{json, Map, Value};
-use ted_core::process::{Piped, Program};
+use ted_core::process::{self, Piped, Program};
 use ted_core::{JobContext, JobHandle};
 
 use crate::client::{self, ServerId};
@@ -106,13 +105,9 @@ impl Transport {
         let _ = tx.send(Outgoing::request(i64::MAX, "shutdown", Value::Null));
         let _ = tx.send(Outgoing::notification("exit", Value::Null));
         thread::spawn(move || {
-            for _ in 0..200 {
-                if let Ok(Some(_)) = child.try_wait() {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(10));
+            if !process::exits_in_time(|| matches!(child.try_wait(), Ok(Some(_)))) {
+                let _ = child.kill();
             }
-            let _ = child.kill();
             let _ = child.wait();
         })
     }

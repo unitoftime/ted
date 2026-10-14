@@ -11,10 +11,13 @@
 
 mod parse;
 
-use std::io::{self, Read};
+use std::io::{self, PipeReader, Read};
 use std::path::PathBuf;
-use std::process::ExitStatus;
+use std::process::{Child, ExitStatus};
+use std::sync::Arc;
 use std::time::Instant;
+
+use parking_lot::Mutex;
 
 use crate::buffer::{BufferId, Decoration, StyledText};
 use crate::editor::{BufferScope, Editor};
@@ -44,6 +47,9 @@ struct Compilation {
 
 struct Run {
     job: JobHandle,
+    /// The shell running the command. The job reaps it once its output ends; a restart
+    /// can't wait for that (see `quitting`).
+    child: Arc<Mutex<Child>>,
     pid: u32,
     started: Instant,
 }
@@ -96,6 +102,7 @@ pub fn register(ed: &mut Editor) {
             stop(ed, id);
         }
     });
+    ed.hooks.on_quit(quitting);
 }
 
 /// The active workspace's last build command and directory, else the configured command at
@@ -132,12 +139,13 @@ fn run(ed: &mut Editor, command: String, dir: PathBuf) {
     locations::set_current(ed, id);
 
     let run = match Program::shell(&command, &dir).env("TERM", "dumb").spawn_merged() {
-        Ok(process) => {
-            let pid = process.child.id();
-            let job_dir = dir.clone();
-            let job = ed.spawn(move |ctx| stream(&ctx, id, process, job_dir));
+        Ok(Merged { child, output }) => {
+            let pid = child.id();
+            let child = Arc::new(Mutex::new(child));
+            let (job_child, job_dir) = (child.clone(), dir.clone());
+            let job = ed.spawn(move |ctx| stream(&ctx, id, output, &job_child, job_dir));
             ed.set_status(format!("Compiling: {}", command));
-            Some(Run { job, pid, started: Instant::now() })
+            Some(Run { job, child, pid, started: Instant::now() })
         }
         Err(e) => {
             let text = format!("Failed to run '{}': {}", command, e);
@@ -158,13 +166,37 @@ fn stop(ed: &mut Editor, id: BufferId) -> Option<Run> {
     Some(run)
 }
 
+/// As the editor stops to restart: stops every build and waits until its shell is gone,
+/// killing one that won't stop. The restarted ted is this same process but no longer
+/// reads the build's output, and a shell that outlived the restart would stay its child
+/// and never be reaped. A ted that exits leaves its builds to init.
+fn quitting(ed: &mut Editor) {
+    if ed.restart.is_none() {
+        return;
+    }
+    for id in ed.buffers.ids() {
+        if ed.buffers[id].local::<Compilation>().is_none() {
+            continue;
+        }
+        let Some(run) = stop(ed, id) else {
+            continue;
+        };
+        // The job may hold the shell while it waits for it, hence `try_lock`.
+        let exited = || run.child.try_lock().is_some_and(|mut child| matches!(child.try_wait(), Ok(Some(_))));
+        if !process::exits_in_time(exited) {
+            process::kill_group(run.pid);
+        }
+        let _ = run.child.lock().wait();
+    }
+}
+
 /// Job thread: parses output as it arrives and sends it on in batches, one per read, so
 /// a chatty build costs the UI a few appends rather than one per line.
-fn stream(ctx: &JobContext, id: BufferId, mut process: Merged, dir: PathBuf) {
+fn stream(ctx: &JobContext, id: BufferId, mut output: PipeReader, child: &Mutex<Child>, dir: PathBuf) {
     let mut parser = OutputParser::new(dir);
     let mut chunk = vec![0; 64 * 1024];
     loop {
-        let n = match process.output.read(&mut chunk) {
+        let n = match output.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -178,7 +210,7 @@ fn stream(ctx: &JobContext, id: BufferId, mut process: Merged, dir: PathBuf) {
     }
     let mut batch = Batch::default();
     parser.finish(&mut batch);
-    let status = process.child.wait();
+    let status = child.lock().wait();
     ctx.send(move |ed| {
         append(ed, id, batch);
         finish(ed, id, status);

@@ -5,6 +5,11 @@
 use std::io::{self, PipeReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// How long a program told to stop gets before it is killed.
+const GRACE: Duration = Duration::from_secs(2);
 
 /// A program to run: its arguments, working directory and environment additions.
 #[derive(Debug, Clone)]
@@ -118,6 +123,7 @@ impl Program {
             (Some(stdin), Some(stdout)) => Ok(Piped { child, stdin, stdout }),
             _ => {
                 let _ = child.kill();
+                let _ = child.wait();
                 Err(io::Error::other("pipes unavailable"))
             }
         }
@@ -142,10 +148,38 @@ impl Program {
 /// (make's compilers, test binaries): it leads its own process group.
 pub fn terminate_group(pid: u32) {
     #[cfg(unix)]
-    // SAFETY: kill(2) takes no pointers; a negative pid signals the whole process group.
-    unsafe {
-        libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
-    }
+    signal_group(pid, libc::SIGTERM);
     #[cfg(not(unix))]
     let _ = pid;
+}
+
+/// Like `terminate_group`, for a group that didn't stop when asked.
+pub fn kill_group(pid: u32) {
+    #[cfg(unix)]
+    signal_group(pid, libc::SIGKILL);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: libc::c_int) {
+    // SAFETY: kill(2) takes no pointers; a negative pid signals the whole process group.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), signal);
+    }
+}
+
+/// Waits until `exited` holds, for a program that was told to stop. Returns false if it
+/// still doesn't once the program's time is up: the caller kills it.
+pub fn exits_in_time(mut exited: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + GRACE;
+    loop {
+        if exited() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
