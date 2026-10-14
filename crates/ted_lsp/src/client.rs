@@ -1,4 +1,5 @@
 //! Clients: one running server per (language, project root), and the documents it serves.
+//! A file outside any repository joins a running server rather than starting its own.
 //!
 //! All state lives in the editor-wide `Lsp` extension and is touched only on the UI
 //! thread. Requests register a callback under their id; the reader thread delivers the
@@ -21,7 +22,7 @@ use serde_json::{json, Value};
 use ted_core::completion::TriggerChars;
 use ted_core::process::Program;
 use ted_core::text::collapse_tilde;
-use ted_core::{BufferId, Edit, Editor};
+use ted_core::{BufferId, Edit, Editor, Project};
 
 use crate::protocol::{path_to_uri, Encoding};
 use crate::servers::{config_json, ServerSpec};
@@ -191,10 +192,20 @@ pub fn attach(ed: &mut Editor, id: BufferId) {
         return;
     }
     let config = config_json(settings.get_in(lsp.config, mode));
-    let root = spec.root_for(&path);
+    let active = ed.active_buffer_id();
+    let project = Project::of(Some(&path));
+    let root = spec.root_for(&project, &path);
     let lsp = ed.ext_mut::<Lsp>();
-    let existing = lsp.clients.iter().position(|c| c.is_live() && c.spec.language == spec.language && c.root == root);
-    let server = match existing {
+    let serves = |c: &Client| c.is_live() && c.spec.language == spec.language;
+    let existing = lsp.clients.iter().position(|c| serves(c) && c.root == root);
+    // A file outside any repository is most often a library's source (the standard
+    // library, a dependency's cache): the server of the buffer it was reached from knows
+    // it, else the language's newest one stands in.
+    let adopter = || {
+        let origin = lsp.docs.get(&active).map(|doc| doc.server).filter(|&server| serves(&lsp.clients[server]));
+        origin.or_else(|| lsp.clients.iter().rposition(serves))
+    };
+    let server = match existing.or_else(|| (!project.is_git()).then(adopter).flatten()) {
         Some(server) => server,
         None if lsp.failed.contains(&(spec.language, root.clone())) => return,
         None => match start(ed, spec, &command, config, &root) {

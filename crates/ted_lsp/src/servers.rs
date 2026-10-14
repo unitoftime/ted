@@ -85,16 +85,18 @@ impl ServerSpec {
         SERVERS.iter().find(|s| s.mode == mode)
     }
 
-    /// The root of the project `file` belongs to, for this language.
-    pub fn root_for(&self, file: &Path) -> PathBuf {
-        let repo = Project::of(Some(file)).root;
+    /// The root a server for `file` in `project` works from. In a repository that is its
+    /// outermost marked directory, else the repository; outside one, the nearest marked
+    /// directory above the file, else the file's own.
+    pub fn root_for(&self, project: &Project, file: &Path) -> PathBuf {
         let dir = file.parent().unwrap_or(file);
-        let marked = dir
-            .ancestors()
-            .take_while(|d| d.starts_with(&repo))
-            .filter(|d| self.root_markers.iter().any(|m| d.join(m).exists()))
-            .last();
-        marked.map_or(repo, Path::to_path_buf)
+        let marked = |d: &&Path| self.root_markers.iter().any(|m| d.join(m).exists());
+        let root = if project.is_git() {
+            dir.ancestors().take_while(|d| d.starts_with(&project.root)).filter(marked).last()
+        } else {
+            dir.ancestors().find(marked)
+        };
+        root.map_or_else(|| project.root.clone(), Path::to_path_buf)
     }
 
     /// Whether the server is told when `file` changes on disk. Never for a hidden one
