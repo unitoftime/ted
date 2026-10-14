@@ -40,7 +40,7 @@ fn rename(ed: &mut Editor) {
                 Ok((0, _)) => format!("Nothing to rename for '{}'", symbol),
                 Ok((edits, 1)) => format!("Renamed '{}' to '{}' ({} edits)", symbol, name, edits),
                 Ok((edits, files)) => format!(
-                    "Renamed '{}' to '{}': {} edits in {} files (M-x save-some-buffers saves them)",
+                    "Renamed '{}' to '{}': {} edits in {} files (C-x g or M-x save-some-buffers offers to save them)",
                     symbol, name, edits, files
                 ),
             });

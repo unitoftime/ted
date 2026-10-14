@@ -96,10 +96,25 @@ pub fn save_some_buffers(ed: &mut Editor, then: impl FnOnce(&mut Editor) + 'stat
 /// As `save_some_buffers`, asking only about the modified files among `ids`.
 pub fn offer_to_save(ed: &mut Editor, ids: Vec<BufferId>, then: impl FnOnce(&mut Editor) + 'static) {
     let pending = modified(ed, ids);
-    ask_to_save(ed, pending, Box::new(then));
+    ask_to_save(ed, pending, OnQuit::Cancel, Box::new(then));
 }
 
-fn ask_to_save(ed: &mut Editor, mut pending: Vec<BufferId>, then: Continuation) {
+/// Asks about the modified files under `root`, as before refreshing a view of that tree.
+/// Quitting only stops the questions: `then` still runs, unless a save failed.
+pub fn offer_to_save_under(ed: &mut Editor, root: &Path, then: impl FnOnce(&mut Editor) + 'static) {
+    let mut pending = modified_files(ed);
+    pending.retain(|&id| ed.buffers[id].path().is_some_and(|p| p.starts_with(root)));
+    ask_to_save(ed, pending, OnQuit::Continue, Box::new(then));
+}
+
+/// Whether quitting the save questions abandons the continuation or runs it anyway.
+#[derive(Clone, Copy)]
+enum OnQuit {
+    Cancel,
+    Continue,
+}
+
+fn ask_to_save(ed: &mut Editor, mut pending: Vec<BufferId>, on_quit: OnQuit, then: Continuation) {
     pending.retain(|&id| ed.buffers.get(id).is_some_and(|b| b.is_dirty()));
     let Some(&id) = pending.first() else {
         then(ed);
@@ -112,10 +127,13 @@ fn ask_to_save(ed: &mut Editor, mut pending: Vec<BufferId>, then: Continuation) 
     let choice = Choice::new("save-some-buffers", label, "yn!q", move |ed, key| {
         let rest = pending[1..].to_vec();
         match key {
-            'y' => write(ed, id, move |ed| ask_to_save(ed, rest, then)),
-            'n' => ask_to_save(ed, rest, then),
+            'y' => write(ed, id, move |ed| ask_to_save(ed, rest, on_quit, then)),
+            'n' => ask_to_save(ed, rest, on_quit, then),
             '!' => write_all(ed, pending, then),
-            _ => ed.set_status("Canceled"),
+            _ => match on_quit {
+                OnQuit::Cancel => ed.set_status("Canceled"),
+                OnQuit::Continue => then(ed),
+            },
         }
     });
     ed.push_modal(choice);

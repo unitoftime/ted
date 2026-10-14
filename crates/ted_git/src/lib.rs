@@ -16,6 +16,9 @@
 //! | `$` | the git process log |
 //! | `g` / `q` | refresh / quit window |
 //!
+//! `C-x g` and `g` first offer to save the repository's modified files, so the status
+//! shows them as on disk; `q` at that prompt skips the rest and refreshes anyway.
+//!
 //! `h` / `?`, `n` / `p`, `g` and `q` come from the `special` keymap every git buffer
 //! inherits. Diff buffers (`d`, and RET on a commit) show files and hunks the same way,
 //! with `TAB`, `RET` and `s` / `u` / `k` working as in the status buffer.
@@ -36,6 +39,7 @@ mod status;
 
 use std::path::{Path, PathBuf};
 
+use ted_core::commands::files::offer_to_save_under;
 use ted_core::{BufferId, BufferScope, Editor, Face, FaceId, Faces, KeymapDef, Mode, Plugin};
 
 use crate::changes::Action;
@@ -149,6 +153,12 @@ fn repo_command(ed: &mut Editor, name: &str, doc: &str, run: fn(&mut Editor, Pat
     });
 }
 
+/// Offers to save the modified files in repository `root` so `run` sees them as on disk.
+fn save_then(ed: &mut Editor, root: PathBuf, run: fn(&mut Editor, PathBuf)) {
+    let tree = root.clone();
+    offer_to_save_under(ed, &tree, move |ed| run(ed, root));
+}
+
 impl Plugin for GitPlugin {
     fn name(&self) -> &str {
         "git"
@@ -157,8 +167,12 @@ impl Plugin for GitPlugin {
     fn init(&mut self, ed: &mut Editor) {
         *ed.ext_mut::<GitFaces>() = GitFaces::register(&mut ed.faces);
 
-        repo_command(ed, "git-status", "Show the git status of the current repository", status::open);
-        repo_command(ed, "git-refresh", "Refresh the git status buffer", |ed, root| status::refresh(ed, &root));
+        repo_command(ed, "git-status", "Show the git status of the current repository", |ed, root| {
+            save_then(ed, root, status::open)
+        });
+        repo_command(ed, "git-refresh", "Refresh the git status buffer", |ed, root| {
+            save_then(ed, root, |ed, root| status::refresh(ed, &root))
+        });
         repo_command(ed, "git-commit", "Commit menu", menus::commit);
         repo_command(ed, "git-push", "Push menu", menus::push);
         repo_command(ed, "git-pull", "Pull menu", menus::pull);
