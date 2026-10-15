@@ -156,12 +156,14 @@ pub fn target(files: &[FileDiff], line: Line) -> Option<(String, usize)> {
     Some((file.path.clone(), hunk.new_start().saturating_sub(1) + offset))
 }
 
-/// Visits `path` (relative to `root`) at `line`.
-pub fn visit(ed: &mut Editor, root: &Path, path: &str, line: usize) {
+/// Visits `path` (relative to `root`) at `line`, or where opening it leaves point (a
+/// directory's first entry, a file's remembered place).
+pub fn visit(ed: &mut Editor, root: &Path, path: &str, line: Option<usize>) {
     if let Err(e) = ed.open_file(root.join(path)) {
         ed.set_status(format!("Cannot open {}: {}", path, e));
         return;
     }
+    let Some(line) = line else { return };
     let mut doc = ed.doc();
     let pos = doc.buf.line_to_char(line.min(doc.buf.len_lines() - 1));
     doc.jump_to(pos);

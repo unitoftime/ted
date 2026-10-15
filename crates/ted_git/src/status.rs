@@ -249,8 +249,8 @@ pub fn visit(ed: &mut Editor) {
     let Some((root, item)) = at_point(ed) else { return };
     let Some(status) = status_of(ed) else { return };
     let target = match item {
-        Item::Untracked(i) => status.untracked.get(i).map(|path| (path.clone(), 0)),
-        Item::Change(section, line) => changes::target(status.files(section), line),
+        Item::Untracked(i) => status.untracked.get(i).map(|path| (path.clone(), None)),
+        Item::Change(section, line) => changes::target(status.files(section), line).map(|(path, l)| (path, Some(l))),
         Item::Stash(i) => return diff::show(ed, root, Source::Stash(status.stashes[i].name.clone())),
         Item::Commit(c) => return diff::show(ed, root, Source::Commit(status.recent[c].hash.clone())),
         _ => None,

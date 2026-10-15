@@ -245,7 +245,7 @@ pub fn visit(ed: &mut Editor) {
         return;
     };
     let root = ed.active_buffer().directory();
-    changes::visit(ed, &root, &path, line);
+    changes::visit(ed, &root, &path, Some(line));
 }
 
 /// `s` / `u` / `k`: stages, unstages or discards the file or hunk at point, or the changed
