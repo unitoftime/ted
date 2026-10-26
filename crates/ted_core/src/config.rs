@@ -9,6 +9,8 @@
 //!   keymap (a mode's is named after it: `"git-log"`). `keys` may be an array of key
 //!   sequences, and `command` may carry an argument (`"describe-prefix C-c"`).
 //! - `unbind(keys)` / `unbind(keymap, keys)`.
+//! - `alias(name, command)`: another name for a command, for M-x (`alias("rs",
+//!   "replace-string")`). `command` may carry an argument, as in `bind`.
 //! - `face(name, #{ fg, bg, bold, italic, underline })`: restyles a face.
 //! - `mode(name, #{ .. })`: the mode's `comment`, `extensions`, `line_numbers` and
 //!   `highlight_line`, and any setting, which then applies to the mode's buffers.
@@ -63,6 +65,11 @@ pub enum ConfigOp {
     Unbind {
         keymap: String,
         keys: String,
+    },
+    /// A command named `name` that runs `command`, which may carry an argument as in `Bind`.
+    Alias {
+        name: String,
+        command: String,
     },
     /// Overrides a face, e.g. `face("keyword", #{ fg: "#c586c0", bold: true })`.
     Face {
@@ -141,6 +148,12 @@ pub fn run_script(source: &str) -> Script {
     let s = script.clone();
     engine.register_fn("unbind", move |ctx: NativeCallContext, keymap: &str, keys: Dynamic| {
         push(&s, &ctx, unbinds(keymap_name(keymap), &keys));
+    });
+
+    let s = script.clone();
+    engine.register_fn("alias", move |ctx: NativeCallContext, name: &str, command: &str| {
+        let op = ConfigOp::Alias { name: name.to_string(), command: command.to_string() };
+        push(&s, &ctx, Ok(vec![op]));
     });
 
     let s = script.clone();

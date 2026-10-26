@@ -52,6 +52,7 @@ bind("M-o", "other-window");
 bind(["C-x j", "C-x C-j"], "switch-to-buffer");
 bind("markdown", "C-c C-t", "toggle-theme");   // in a mode's (or any other) keymap
 unbind("C-z");
+alias("rs", "replace-string");                 // M-x rs
 
 // A mode's own properties, and settings that apply only to its buffers.
 mode("markdown", #{ line_numbers: false });

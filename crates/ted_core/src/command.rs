@@ -107,6 +107,7 @@ impl fmt::Display for PrefixArg {
 
 pub type CommandFn = Rc<dyn Fn(&mut Editor, &Arg)>;
 
+#[derive(Clone)]
 pub struct Command {
     pub name: String,
     pub doc: String,
@@ -116,7 +117,7 @@ pub struct Command {
     run: CommandFn,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Commands {
     list: Vec<Command>,
     by_name: HashMap<String, CommandId>,
@@ -155,6 +156,17 @@ impl Commands {
 
     pub fn iter(&self) -> impl Iterator<Item = (CommandId, &Command)> {
         self.list.iter().enumerate().map(|(i, c)| (CommandId(i as u32), c))
+    }
+
+    /// Restores the commands `snapshot` had. Commands registered since lose their names,
+    /// so they leave M-x and can't be bound, but their ids stay valid.
+    pub fn restore(&mut self, snapshot: &Commands) {
+        let kept = snapshot.list.len();
+        self.list[..kept].clone_from_slice(&snapshot.list);
+        for orphan in &mut self.list[kept..] {
+            orphan.hidden = true;
+        }
+        self.by_name.clone_from(&snapshot.by_name);
     }
 
     pub(crate) fn handler(&self, id: CommandId) -> CommandFn {

@@ -61,9 +61,10 @@ impl StartupOptions {
     }
 }
 
-/// Keymaps, modes and settings as the built-ins and plugins left them, before `init.rhai`;
-/// `reload-init` starts over from here.
+/// Commands, keymaps, modes and settings as the built-ins and plugins left them, before
+/// `init.rhai`; `reload-init` starts over from here.
 struct Defaults {
+    commands: Commands,
     keymaps: Keymaps,
     modes: ModeRegistry,
     settings: Vec<Value>,
@@ -174,8 +175,12 @@ impl Editor {
         for plugin in options.plugins {
             ed.add_plugin_boxed(plugin);
         }
-        ed.defaults =
-            Some(Defaults { keymaps: ed.keymaps.clone(), modes: ed.modes.clone(), settings: ed.settings.values() });
+        ed.defaults = Some(Defaults {
+            commands: ed.commands.clone(),
+            keymaps: ed.keymaps.clone(),
+            modes: ed.modes.clone(),
+            settings: ed.settings.values(),
+        });
         ed.load_init_script();
 
         for (i, file) in files.iter().enumerate() {
@@ -237,10 +242,11 @@ impl Editor {
         }
     }
 
-    /// Returns keymaps, modes, settings and faces to their defaults, then runs `init.rhai`
-    /// again, so edits to it (including removed lines) take effect without a restart.
+    /// Returns commands, keymaps, modes, settings and faces to their defaults, then runs
+    /// `init.rhai` again, so edits to it (including removed lines) take effect without a restart.
     pub fn reload_init(&mut self) {
         let Some(defaults) = self.defaults.take() else { return };
+        self.commands.restore(&defaults.commands);
         self.keymaps.restore(&defaults.keymaps);
         let mode_settings = |modes: &ModeRegistry| -> Vec<u16> {
             modes.iter().flat_map(|mode| mode.settings().iter().map(|(index, _)| *index)).collect()
@@ -271,6 +277,7 @@ impl Editor {
                 ConfigOp::Set { key, value } => self.set_setting(key, value),
                 ConfigOp::Bind { keymap, keys, command } => self.bind(keymap, keys, command),
                 ConfigOp::Unbind { keymap, keys } => self.unbind(keymap, keys),
+                ConfigOp::Alias { name, command } => self.alias(name, command),
                 ConfigOp::Face { name, face } => self.faces.customize(name, *face),
                 ConfigOp::Mode { name, values } => self.customize_mode(name, values),
             };
@@ -286,14 +293,29 @@ impl Editor {
     /// name optionally followed by an argument, e.g. `"layout-restore 2"`.
     pub fn bind(&mut self, keymap: &str, keys: &str, spec: &str) -> Result<(), String> {
         let seq = Key::parse_seq(keys)?;
+        let binding = self.command_spec(spec)?;
+        let map = self.keymaps.id(keymap).ok_or_else(|| format!("Unknown keymap '{}'", keymap))?;
+        self.keymaps.get_mut(map).bind(&seq, binding);
+        Ok(())
+    }
+
+    /// Registers the command `name` to run `spec`, a command name optionally followed by
+    /// an argument as in `bind`. The alias passes its prefix argument on.
+    pub fn alias(&mut self, name: &str, spec: &str) -> Result<(), String> {
+        let Binding { command, arg } = self.command_spec(spec)?;
+        let doc = format!("Alias for {}", spec.trim());
+        self.commands.register(name, &doc, move |ed, _| ed.call(command, &arg));
+        Ok(())
+    }
+
+    /// Parses `spec`, a command name optionally followed by an argument (`"layout-restore 2"`).
+    fn command_spec(&self, spec: &str) -> Result<Binding, String> {
         let (name, arg) = match spec.trim().split_once(' ') {
             Some((name, arg)) => (name, Arg::parse(arg.trim())),
             None => (spec.trim(), Arg::None),
         };
         let command = self.commands.id(name).ok_or_else(|| format!("Unknown command '{}'", name))?;
-        let map = self.keymaps.id(keymap).ok_or_else(|| format!("Unknown keymap '{}'", keymap))?;
-        self.keymaps.get_mut(map).bind(&seq, Binding { command, arg });
-        Ok(())
+        Ok(Binding { command, arg })
     }
 
     pub fn unbind(&mut self, keymap: &str, keys: &str) -> Result<(), String> {
