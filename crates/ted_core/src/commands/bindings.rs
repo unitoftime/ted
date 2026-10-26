@@ -46,6 +46,8 @@ const LINE_EDITING: &[(&str, &str)] = &[
     // Mark
     ("C-SPC", "set-mark-command"),
     ("C-@", "set-mark-command"),
+    // Prefix argument
+    ("C-u", "universal-argument"),
 ];
 
 const GLOBAL: &[(&str, &str)] = &[
@@ -176,6 +178,23 @@ const COMPLETION: &[(&str, &str)] = &[
     ("ESC", "modal-quit"),
 ];
 
+/// Read while a prefix argument is typed (`C-u 80`); other keys run a command with it.
+const DIGIT_ARGUMENT: &[(&str, &str)] = &[
+    ("0", "digit-argument 0"),
+    ("1", "digit-argument 1"),
+    ("2", "digit-argument 2"),
+    ("3", "digit-argument 3"),
+    ("4", "digit-argument 4"),
+    ("5", "digit-argument 5"),
+    ("6", "digit-argument 6"),
+    ("7", "digit-argument 7"),
+    ("8", "digit-argument 8"),
+    ("9", "digit-argument 9"),
+];
+
+/// Right after `C-u`, before any digit: `-` negates. Once digits follow it types as usual.
+const UNIVERSAL_ARGUMENT: &[(&str, &str)] = &[("-", "negative-argument")];
+
 const TOOLTIP: &[(&str, &str)] = &[("C-g", "modal-quit"), ("ESC", "modal-quit")];
 
 const CHOICE: &[(&str, &str)] = &[("C-g", "modal-quit"), ("ESC", "modal-quit")];
@@ -242,6 +261,8 @@ pub(crate) fn install_defaults(ed: &mut Editor) {
         KeymapDef::new("special").keys(SPECIAL),
         modal("completion").fallback("completion-key").keys(COMPLETION),
         modal("tooltip").fallback("tooltip-exit-and-replay").keys(TOOLTIP),
+        KeymapDef::new("digit-argument").keys(DIGIT_ARGUMENT),
+        KeymapDef::new("universal-argument").parent("digit-argument").keys(UNIVERSAL_ARGUMENT),
     ];
     for keymap in keymaps {
         ed.define_keymap(keymap);

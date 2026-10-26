@@ -78,6 +78,31 @@ fn test_kill_ring_coalesce_and_yank_pop() {
     assert!(text(&editor).contains("Line 1\nLine 2"));
 }
 
+/// `C-u` counts: digits build the number, `-` negates only before them, `C-u` after
+/// digits ends the argument so the next digit types, and M-x passes it on.
+#[test]
+fn test_prefix_argument() {
+    let mut ed = editor_with("");
+    press(&mut ed, &[ctrl('u')]);
+    type_keys(&mut ed, "80-");
+    assert_eq!(text(&ed), "-".repeat(80));
+
+    let mut ed = editor_with("");
+    press(&mut ed, &[ctrl('u'), ctrl('u')]);
+    type_keys(&mut ed, "x");
+    press(&mut ed, &[ctrl('u'), KeyEvent::plain_char('3'), ctrl('u')]);
+    type_keys(&mut ed, "1");
+    press(&mut ed, &[ctrl('u'), KeyEvent::plain_char('-'), KeyEvent::plain_char('2'), ctrl('d')]);
+    assert_eq!(text(&ed), format!("{}1", "x".repeat(16)));
+    assert_eq!(pos(&ed), 17);
+
+    // M-x hands its argument to the command it runs.
+    press(&mut ed, &[ctrl('a'), ctrl('u'), KeyEvent::plain_char('3'), alt('x')]);
+    type_keys(&mut ed, "forward-char");
+    press(&mut ed, &[enter()]);
+    assert_eq!(pos(&ed), 3);
+}
+
 #[test]
 fn test_search_and_replace_workflow() {
     let mut editor = editor_with("apple banana apple cherry apple");

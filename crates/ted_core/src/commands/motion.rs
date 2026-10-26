@@ -1,6 +1,6 @@
 //! Cursor motion, scrolling and the mark.
 
-use crate::commands::motion;
+use crate::commands::{motion, motion_count};
 use crate::doc::RecenterTarget;
 use crate::editor::Editor;
 
@@ -13,18 +13,36 @@ struct LineDrag(usize);
 
 pub fn register(ed: &mut Editor) {
     let c = &mut ed.commands;
-    c.register("forward-char", "Move point right one character", |ed, _| motion(ed, |d| d.move_right()));
-    c.register("backward-char", "Move point left one character", |ed, _| motion(ed, |d| d.move_left()));
-    c.register("next-line", "Move point down one visual line", |ed, _| motion(ed, |d| d.move_rows(1)));
-    c.register("previous-line", "Move point up one visual line", |ed, _| motion(ed, |d| d.move_rows(-1)));
+    c.register("forward-char", "Move point right one character", |ed, _| {
+        let n = motion_count(ed);
+        motion(ed, |d| d.move_chars(n))
+    });
+    c.register("backward-char", "Move point left one character", |ed, _| {
+        let n = motion_count(ed);
+        motion(ed, |d| d.move_chars(-n))
+    });
+    c.register("next-line", "Move point down one visual line", |ed, _| {
+        let n = motion_count(ed);
+        motion(ed, |d| d.move_rows(n))
+    });
+    c.register("previous-line", "Move point up one visual line", |ed, _| {
+        let n = motion_count(ed);
+        motion(ed, |d| d.move_rows(-n))
+    });
     c.register("beginning-of-line", "Move point to start of line", |ed, _| motion(ed, |d| d.move_line_start()));
     c.register("end-of-line", "Move point to end of line", |ed, _| motion(ed, |d| d.move_line_end()));
     c.register("beginning-of-buffer", "Move point to beginning of buffer", |ed, _| {
         motion(ed, |d| d.move_buffer_start())
     });
     c.register("end-of-buffer", "Move point to end of buffer", |ed, _| motion(ed, |d| d.move_buffer_end()));
-    c.register("forward-word", "Move point forward one word", |ed, _| motion(ed, |d| d.move_word_forward()));
-    c.register("backward-word", "Move point backward one word", |ed, _| motion(ed, |d| d.move_word_backward()));
+    c.register("forward-word", "Move point forward one word", |ed, _| {
+        let n = motion_count(ed);
+        motion(ed, |d| d.move_words(n))
+    });
+    c.register("backward-word", "Move point backward one word", |ed, _| {
+        let n = motion_count(ed);
+        motion(ed, |d| d.move_words(-n))
+    });
     c.register("scroll-down", "Scroll down one page, point staying on its screen line", |ed, _| {
         motion(ed, |d| d.move_page(1))
     });

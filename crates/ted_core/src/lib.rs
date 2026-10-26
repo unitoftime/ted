@@ -59,7 +59,7 @@ pub mod workspace;
 pub mod xref;
 
 pub use buffer::{Buffer, BufferId, Buffers, Decoration, Edit, Margin, Place, StyledText};
-pub use command::{Arg, CommandId, Commands};
+pub use command::{Arg, CommandId, Commands, PrefixArg};
 pub use config::ConfigOp;
 pub use doc::Doc;
 pub use editor::{BufferScope, Editor, StartupOptions};

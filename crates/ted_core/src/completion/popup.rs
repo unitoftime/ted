@@ -144,7 +144,7 @@ pub(super) fn register(ed: &mut Editor) {
         "completion-delete-backward-char",
         "Delete the character before point and complete again",
         |ed, _| {
-            edit(ed, |d| d.backspace());
+            edit(ed, |d| d.backspace(1));
             refresh(ed);
         },
     );

@@ -9,6 +9,7 @@ pub mod help;
 pub mod jump;
 pub mod modal;
 pub mod motion;
+pub mod prefix_arg;
 pub mod search;
 pub mod undo_tree;
 pub mod windows;
@@ -26,6 +27,7 @@ pub(crate) fn register_builtin(ed: &mut Editor) {
     help::register(ed);
     jump::register(ed);
     modal::register(ed);
+    prefix_arg::register(ed);
     undo_tree::register(ed);
     crate::rows::register(ed);
     crate::locations::register(ed);
@@ -45,6 +47,16 @@ pub fn motion(ed: &mut Editor, f: impl FnOnce(&mut Doc)) {
     doc.rejoin_view(Rejoin::Nearest);
     doc.begin_motion(shift);
     f(&mut doc);
+}
+
+/// The current command's count (`C-u 4`) as a signed distance; negative moves backward.
+pub fn motion_count(ed: &Editor) -> isize {
+    ed.count().clamp(isize::MIN as i64, isize::MAX as i64) as isize
+}
+
+/// The current command's count as a number of repetitions; a negative count repeats nothing.
+pub fn repeats(ed: &Editor) -> usize {
+    usize::try_from(ed.count()).unwrap_or(0)
 }
 
 /// Runs an edit on the focused doc, refusing (with a message) in read-only buffers. Other

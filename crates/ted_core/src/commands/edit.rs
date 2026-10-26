@@ -1,6 +1,6 @@
 //! Text editing: insertion, deletion, the kill ring, undo and comments.
 
-use crate::commands::edit;
+use crate::commands::{edit, motion_count, repeats};
 use crate::doc::Doc;
 use crate::editor::{Editor, UndoChain};
 use crate::kill_ring::KillMode;
@@ -18,15 +18,28 @@ struct Yanked {
 pub fn register(ed: &mut Editor) {
     let c = &mut ed.commands;
     c.register_hidden("self-insert-command", "Insert the typed character", |ed, arg| {
-        if let Some(ch) = arg.char() {
-            edit(ed, |d| d.insert_char(ch));
+        let Some(ch) = arg.char() else { return };
+        match repeats(ed) {
+            0 => {}
+            1 => {
+                edit(ed, |d| d.insert_char(ch));
+            }
+            n => {
+                edit(ed, |d| d.insert_text(&ch.to_string().repeat(n)));
+            }
         }
     });
     c.register("newline", "Insert a newline, keeping indentation", |ed, _| {
-        edit(ed, |d| d.newline());
+        let n = repeats(ed);
+        if n > 0 {
+            edit(ed, |d| d.newline(n));
+        }
     });
     c.register("open-line", "Insert a newline after point without moving", |ed, _| {
-        edit(ed, |d| d.open_line());
+        let n = repeats(ed);
+        if n > 0 {
+            edit(ed, |d| d.open_line(n));
+        }
     });
     c.register("indent-for-tab-command", "Reindent the line or region to fit the code around it", |ed, _| {
         edit(ed, |d| d.indent_for_tab());
@@ -35,20 +48,21 @@ pub fn register(ed: &mut Editor) {
         edit(ed, |d| d.outdent());
     });
     c.register("delete-backward-char", "Delete the character before point", |ed, _| {
-        edit(ed, |d| d.backspace());
+        delete_chars(ed, -motion_count(ed));
     });
     c.register("delete-char", "Delete the character under point", |ed, _| {
-        edit(ed, |d| d.delete_forward());
+        delete_chars(ed, motion_count(ed));
     });
 
-    c.register("kill-line", "Cut to the end of the line into the kill ring", |ed, _| {
-        kill(ed, KillMode::Append, |d| d.kill_line());
+    c.register("kill-line", "Cut to the end of the line into the kill ring (or N whole lines)", |ed, _| {
+        let lines = ed.prefix_arg().map(|_| motion_count(ed));
+        kill(ed, KillMode::Append, |d| d.kill_line(lines));
     });
     c.register("kill-word", "Cut the word after point", |ed, _| {
-        kill(ed, KillMode::Append, |d| d.kill_word_forward());
+        kill_words(ed, motion_count(ed));
     });
     c.register("backward-kill-word", "Cut the word before point", |ed, _| {
-        kill(ed, KillMode::Prepend, |d| d.kill_word_backward());
+        kill_words(ed, -motion_count(ed));
     });
     c.register("kill-region", "Cut the selected region into the kill ring", |ed, _| {
         let killed = kill(ed, KillMode::Append, |d| d.kill_region());
@@ -89,7 +103,8 @@ pub fn register(ed: &mut Editor) {
     });
 
     c.register("undo", "Undo the last change (repeat to keep undoing)", |ed, _| {
-        match edit(ed, |d| d.undo()) {
+        let n = repeats(ed);
+        match edit(ed, |d| (0..n).take_while(|_| d.undo()).count() > 0) {
             Some(true) => report_revision(ed, "Undo"),
             Some(false) => ed.set_status("Already at oldest change"),
             None => {}
@@ -97,7 +112,8 @@ pub fn register(ed: &mut Editor) {
         ed.set_chain(UndoChain);
     });
     c.register("redo", "Redo the last undone change", |ed, _| {
-        match edit(ed, |d| d.redo()) {
+        let n = repeats(ed);
+        match edit(ed, |d| (0..n).take_while(|_| d.redo()).count() > 0) {
             Some(true) => report_revision(ed, "Redo"),
             Some(false) => ed.set_status("Already at newest change"),
             None => {}
@@ -114,6 +130,24 @@ pub fn register(ed: &mut Editor) {
         doc.buf.end_edit_group();
         ed.set_status("Quit");
     });
+}
+
+/// Deletes `n` characters after point, or before it when negative.
+fn delete_chars(ed: &mut Editor, n: isize) {
+    if n >= 0 {
+        edit(ed, |d| d.delete_forward(n.unsigned_abs()));
+    } else {
+        edit(ed, |d| d.backspace(n.unsigned_abs()));
+    }
+}
+
+/// Kills `n` words after point, or before it when negative.
+fn kill_words(ed: &mut Editor, n: isize) {
+    if n >= 0 {
+        kill(ed, KillMode::Append, |d| d.kill_word_forward(n.unsigned_abs()));
+    } else {
+        kill(ed, KillMode::Prepend, |d| d.kill_word_backward(n.unsigned_abs()));
+    }
 }
 
 /// Runs a killing edit and files the text in the kill ring, merging with an immediately

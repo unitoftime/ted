@@ -293,12 +293,9 @@ impl<'a> Doc<'a> {
         }
     }
 
-    pub fn move_left(&mut self) {
-        self.set_cursor(self.pos().saturating_sub(1));
-    }
-
-    pub fn move_right(&mut self) {
-        self.set_cursor(self.pos() + 1);
+    /// Moves `delta` characters right, or left when negative.
+    pub fn move_chars(&mut self, delta: isize) {
+        self.set_cursor(self.pos().saturating_add_signed(delta));
     }
 
     /// Moves by `delta` visual rows, keeping the goal column.
@@ -347,14 +344,21 @@ impl<'a> Doc<'a> {
         self.set_cursor(self.buf.line_end(last_content));
     }
 
-    pub fn move_word_forward(&mut self) {
-        let n = word_len_forward(self.buf.text().chars_at(self.pos()));
-        self.set_cursor(self.pos() + n);
+    /// Moves `n` words forward, or backward when negative.
+    pub fn move_words(&mut self, n: isize) {
+        self.set_cursor(self.word_target(n));
     }
 
-    pub fn move_word_backward(&mut self) {
-        let n = word_len_backward(self.buf.text().chars_at(self.pos()).reversed());
-        self.set_cursor(self.pos() - n);
+    /// Where moving `n` words forward (backward when negative) from point ends.
+    fn word_target(&self, n: isize) -> usize {
+        let text = self.buf.text();
+        (0..n.unsigned_abs()).fold(self.pos(), |pos, _| {
+            if n > 0 {
+                pos + word_len_forward(text.chars_at(pos))
+            } else {
+                pos - word_len_backward(text.chars_at(pos).reversed())
+            }
+        })
     }
 
     // ---------------------------------------------------------------------------------
@@ -495,16 +499,17 @@ impl<'a> Doc<'a> {
         self.buf.line_content(line).chars().take_while(|c| c.is_whitespace()).collect()
     }
 
-    /// Newline that keeps the current line's indentation.
-    pub fn newline(&mut self) {
-        let text = format!("\n{}", self.current_indentation());
+    /// `n` newlines, the last keeping the current line's indentation.
+    pub fn newline(&mut self, n: usize) {
+        let text = format!("{}{}", "\n".repeat(n), self.current_indentation());
         self.insert_text(&text);
     }
 
-    pub fn open_line(&mut self) {
+    /// `n` newlines after point, which stays put.
+    pub fn open_line(&mut self, n: usize) {
         self.delete_selection();
         let pos = self.pos();
-        self.atomic(|d| d.buf.insert(pos, "\n"));
+        self.atomic(|d| d.buf.insert(pos, &"\n".repeat(n)));
         self.set_cursor(pos);
     }
 
@@ -629,24 +634,28 @@ impl<'a> Doc<'a> {
         self.set_indentation(lines.start, &targets);
     }
 
-    pub fn backspace(&mut self) {
-        if self.delete_selection() || self.pos() == 0 {
+    /// Deletes the `n` characters before point, or the active region.
+    pub fn backspace(&mut self, n: usize) {
+        let pos = self.pos();
+        let start = pos.saturating_sub(n);
+        if self.delete_selection() || start == pos {
             return;
         }
-        let pos = self.pos();
         self.buf.begin_grouped_edit(EditKind::Backspace, pos, false);
-        self.buf.remove(pos - 1..pos);
-        self.set_cursor(pos - 1);
-        self.buf.advance_grouped_edit(pos - 1, false);
+        self.buf.remove(start..pos);
+        self.set_cursor(start);
+        self.buf.advance_grouped_edit(start, false);
     }
 
-    pub fn delete_forward(&mut self) {
-        if self.delete_selection() || self.pos() >= self.buf.len_chars() {
+    /// Deletes the `n` characters after point, or the active region.
+    pub fn delete_forward(&mut self, n: usize) {
+        let pos = self.pos();
+        let end = pos.saturating_add(n).min(self.buf.len_chars());
+        if self.delete_selection() || end == pos {
             return;
         }
-        let pos = self.pos();
         self.buf.begin_grouped_edit(EditKind::Delete, pos, false);
-        self.buf.remove(pos..pos + 1);
+        self.buf.remove(pos..end);
         self.set_cursor(pos);
         self.buf.advance_grouped_edit(pos, false);
     }
@@ -662,28 +671,38 @@ impl<'a> Doc<'a> {
         Some(text)
     }
 
-    /// Kills to the end of the line, or the newline itself when already there.
-    pub fn kill_line(&mut self) -> Option<String> {
+    /// Kills to the end of the line, or the newline itself when already there. Given a
+    /// count of `lines`, kills from point to the start of the line that many lines down, or
+    /// back to the start of the line that many up when it isn't positive.
+    pub fn kill_line(&mut self, lines: Option<isize>) -> Option<String> {
         self.delete_selection();
         let pos = self.pos();
-        let line_end = self.buf.line_end(self.buf.char_to_line(pos));
-        let end = if pos >= line_end { (pos + 1).min(self.buf.len_chars()) } else { line_end };
-        self.cut(pos..end)
+        let line = self.buf.char_to_line(pos);
+        let range = match lines {
+            None => {
+                let line_end = self.buf.line_end(line);
+                pos..if pos >= line_end { (pos + 1).min(self.buf.len_chars()) } else { line_end }
+            }
+            Some(n) => {
+                let target = self.buf.line_to_char(line.saturating_add_signed(n));
+                if n > 0 { pos..target } else { target..pos }
+            }
+        };
+        self.cut(range)
     }
 
-    pub fn kill_word_forward(&mut self) -> Option<String> {
+    /// Kills the `n` words after point; the active region is deleted instead.
+    pub fn kill_word_forward(&mut self, n: usize) -> Option<String> {
         if self.delete_selection() {
             return None;
         }
-        let pos = self.pos();
-        let n = word_len_forward(self.buf.text().chars_at(pos));
-        self.cut(pos..pos + n)
+        let target = self.word_target(n as isize);
+        self.cut(self.pos()..target)
     }
 
-    pub fn kill_word_backward(&mut self) -> Option<String> {
-        let pos = self.pos();
-        let n = word_len_backward(self.buf.text().chars_at(pos).reversed());
-        self.cut(pos - n..pos)
+    pub fn kill_word_backward(&mut self, n: usize) -> Option<String> {
+        let target = self.word_target(-(n as isize));
+        self.cut(target..self.pos())
     }
 
     pub fn kill_region(&mut self) -> Option<String> {

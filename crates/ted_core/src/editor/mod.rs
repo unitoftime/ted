@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::buffer::{Buffer, BufferId, Buffers};
-use crate::command::{Arg, CommandId, Commands};
+use crate::command::{Arg, CommandId, Commands, PrefixArg};
 use crate::config::{self, ConfigOp, Script};
 use crate::doc::Doc;
 use crate::ext::Extensions;
@@ -97,6 +97,12 @@ pub struct Editor {
     /// Keys to handle as typed once the current one is done (`unread_key`).
     unread_keys: Vec<Key>,
     shift_translated: bool,
+    /// The prefix argument being typed, for the next command (`set_prefix_arg`).
+    next_prefix_arg: Option<PrefixArg>,
+    /// The prefix argument of the running command.
+    prefix_arg: Option<PrefixArg>,
+    /// Looked up before the active layers for the next key (`set_transient_keymap`).
+    transient_keymap: Option<KeymapId>,
     last_command: Option<CommandId>,
     last_chain: Option<Box<dyn Any>>,
     this_chain: Option<Box<dyn Any>>,
@@ -140,6 +146,9 @@ impl Editor {
             pending_keys: Vec::new(),
             unread_keys: Vec::new(),
             shift_translated: false,
+            next_prefix_arg: None,
+            prefix_arg: None,
+            transient_keymap: None,
             last_command: None,
             last_chain: None,
             this_chain: None,
@@ -525,7 +534,8 @@ impl Editor {
         }
 
         let layers = self.active_layers();
-        match self.keymaps.resolve(&layers, &self.pending_keys, key) {
+        let lookup: Vec<KeymapId> = self.transient_keymap.into_iter().chain(layers.iter().copied()).collect();
+        match self.keymaps.resolve(&lookup, &self.pending_keys, key) {
             Resolved::Prefix { key } => {
                 self.pending_keys.push(key);
                 self.set_status(format!("{}- (type ? or C-h for help)", format_seq(&self.pending_keys)));
@@ -537,6 +547,8 @@ impl Editor {
                 self.shift_translated = false;
             }
             Resolved::Unbound => {
+                self.next_prefix_arg = None;
+                self.transient_keymap = None;
                 let mut keys = std::mem::take(&mut self.pending_keys);
                 keys.push(key);
                 match layers.first().and_then(|&layer| self.keymaps.fallback(layer)).filter(|_| keys.len() > 1) {
@@ -593,7 +605,9 @@ impl Editor {
     pub fn execute_command(&mut self, id: CommandId, arg: &Arg) {
         let buffer = self.active_buffer_id();
         self.this_chain = None;
-        self.call(id, arg);
+        let prefix_arg = self.next_prefix_arg.take();
+        self.transient_keymap = None;
+        self.call_with_prefix_arg(id, arg, prefix_arg);
         let continues_undo = self.this_chain.as_ref().is_some_and(|c| c.is::<UndoChain>());
         if !continues_undo {
             if let Some(buf) = self.buffers.get_mut(buffer) {
@@ -615,6 +629,14 @@ impl Editor {
         handler(self, arg);
     }
 
+    /// `call`, giving the command `prefix_arg`: for commands that pick another to run
+    /// later and pass their own prefix argument on (`C-u M-x`).
+    pub fn call_with_prefix_arg(&mut self, id: CommandId, arg: &Arg, prefix_arg: Option<PrefixArg>) {
+        let outer = std::mem::replace(&mut self.prefix_arg, prefix_arg);
+        self.call(id, arg);
+        self.prefix_arg = outer;
+    }
+
     /// The command that ran before the current one (Emacs' `last-command`).
     pub fn last_command(&self) -> Option<CommandId> {
         self.last_command
@@ -630,6 +652,27 @@ impl Editor {
     /// Leaves `value` for the next command to find with `last_chain`.
     pub fn set_chain<T: 'static>(&mut self, value: T) {
         self.this_chain = Some(Box::new(value));
+    }
+
+    /// The prefix argument (`C-u`) the current command was given.
+    pub fn prefix_arg(&self) -> Option<PrefixArg> {
+        self.prefix_arg
+    }
+
+    /// The current command's repeat count: its prefix argument's value, else 1.
+    pub fn count(&self) -> i64 {
+        self.prefix_arg.map_or(1, PrefixArg::count)
+    }
+
+    /// Hands `arg` to the next command as its prefix argument (Emacs' `prefix-arg`).
+    pub fn set_prefix_arg(&mut self, arg: PrefixArg) {
+        self.next_prefix_arg = Some(arg);
+    }
+
+    /// Looks the next key up in `keymap` before the active layers (Emacs'
+    /// `set-transient-map`); keys it doesn't bind go on to the layers as usual.
+    pub fn set_transient_keymap(&mut self, keymap: KeymapId) {
+        self.transient_keymap = Some(keymap);
     }
 
     /// Whether the current command was reached by dropping Shift from the key.

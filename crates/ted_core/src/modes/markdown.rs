@@ -26,7 +26,7 @@ pub fn register(ed: &mut Editor) {
                 Continuation::Item(marker) => {
                     d.insert_text(&format!("\n{}{}", indent, marker));
                 }
-                Continuation::Plain => d.newline(),
+                Continuation::Plain => d.newline(1),
             }
         });
     });

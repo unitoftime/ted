@@ -44,6 +44,8 @@ const BUILTIN: &[&str] = &[
     "tooltip",
     "file-search",
     "workspace-switch",
+    "digit-argument",
+    "universal-argument",
 ];
 
 impl KeymapId {
@@ -68,6 +70,10 @@ impl KeymapId {
     pub const FILE_SEARCH: KeymapId = KeymapId(12);
     /// The workspace switcher, on top of `PICKER`: manages the selected workspace.
     pub const WORKSPACE_SWITCH: KeymapId = KeymapId(13);
+    /// Continues a prefix argument once a digit is typed (transient, see `set_transient_keymap`).
+    pub const DIGIT_ARGUMENT: KeymapId = KeymapId(14);
+    /// Starts a prefix argument after `C-u`: digits and `-`, on top of `DIGIT_ARGUMENT`.
+    pub const UNIVERSAL_ARGUMENT: KeymapId = KeymapId(15);
 }
 
 /// A keymap as `Editor::define_keymap` installs it: plain data naming commands, resolved

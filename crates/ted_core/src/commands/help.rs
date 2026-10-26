@@ -33,8 +33,13 @@ pub fn register(ed: &mut Editor) {
                 command_item(ed, id, &Arg::None, keys.unwrap_or_default())
             })
             .collect();
-        ed.pick("execute-extended-command", "Functions (M-x)", items, move |ed, index| {
-            ed.call(ids[index], &Arg::None);
+        let prefix_arg = ed.prefix_arg();
+        let title = match prefix_arg {
+            Some(arg) => format!("Functions ({} M-x)", arg),
+            None => "Functions (M-x)".to_string(),
+        };
+        ed.pick("execute-extended-command", title, items, move |ed, index| {
+            ed.call_with_prefix_arg(ids[index], &Arg::None, prefix_arg);
         });
     });
     c.register("describe-prefix", "List the commands bound under a key prefix", |ed, arg| {
@@ -45,9 +50,10 @@ pub fn register(ed: &mut Editor) {
         let items = groups.iter().map(|(b, keys)| command_item(ed, b.command, &b.arg, keys)).collect();
         let bindings: Vec<Binding> = groups.into_iter().map(|(b, _)| b).collect();
         let title = format!("Helper: {} commands", format_seq(&prefix));
+        let prefix_arg = ed.prefix_arg();
         ed.pick("describe-prefix", title, items, move |ed, index| {
             let b = &bindings[index];
-            ed.call(b.command, &b.arg);
+            ed.call_with_prefix_arg(b.command, &b.arg, prefix_arg);
         });
     });
 

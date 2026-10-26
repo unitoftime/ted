@@ -2,6 +2,7 @@
 //! command here; keymaps, M-x and help all refer to commands by `CommandId`.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
 
 use crate::editor::Editor;
@@ -67,6 +68,39 @@ impl Arg {
         match self {
             Arg::Str(s) => Some(s),
             _ => None,
+        }
+    }
+}
+
+/// A prefix argument, typed before a command (`C-u 80 -`). Commands read it as a count with
+/// `Editor::count`, or inspect it with `Editor::prefix_arg` when bare `C-u` means something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixArg {
+    /// `C-u` typed this many times, without digits: a count of 4 per press.
+    Raw(u32),
+    /// `C-u -` without digits: a count of -1.
+    Minus,
+    /// `C-u` followed by digits.
+    Number(i64),
+}
+
+impl PrefixArg {
+    pub fn count(self) -> i64 {
+        match self {
+            PrefixArg::Raw(presses) => 4i64.saturating_pow(presses),
+            PrefixArg::Minus => -1,
+            PrefixArg::Number(n) => n,
+        }
+    }
+}
+
+/// How the echo area shows the argument while it's being typed.
+impl fmt::Display for PrefixArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PrefixArg::Raw(presses) => f.write_str(&vec!["C-u"; *presses as usize].join(" ")),
+            PrefixArg::Minus => f.write_str("C-u -"),
+            PrefixArg::Number(n) => write!(f, "C-u {}", n),
         }
     }
 }
