@@ -20,6 +20,9 @@ optdepends=(
   'libxkbcommon-x11: X11 session'
   'git: git porcelain'
 )
+# makepkg's LTO compiles the bundled tree-sitter C into GCC bytecode that rustc's link
+# can't resolve; debug builds every crate with full debug info for a -debug package.
+options=('!lto' '!debug')
 provides=('ted')
 conflicts=('ted')
 source=("ted::git+$url.git")
