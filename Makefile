@@ -5,11 +5,13 @@ PREFIX  ?= $(HOME)/.local
 BINDIR  := $(PREFIX)/bin
 APPDIR  := $(PREFIX)/share/applications
 ICONDIR := $(PREFIX)/share/icons/hicolor/scalable/apps
+# Extra cargo flags, e.g. `CARGOFLAGS=--frozen` for offline package builds.
+CARGOFLAGS ?=
 
 all: build
 
 build:
-	cargo build --release
+	cargo build --release $(CARGOFLAGS)
 	mkdir -p bin
 	cp --remove-destination target/release/ted bin/ted
 
@@ -31,9 +33,10 @@ uninstall:
 	$(refresh-caches)
 
 # Launchers pick up new entries on their own; refreshing just makes it immediate. Both tools are optional.
+# Staged installs (DESTDIR set, as in a package build) skip it: the package manager's hooks own the caches.
 define refresh-caches
-	if command -v update-desktop-database >/dev/null; then update-desktop-database -q $(DESTDIR)$(APPDIR); fi
-	if command -v gtk-update-icon-cache >/dev/null; then gtk-update-icon-cache -qtf $(DESTDIR)$(PREFIX)/share/icons/hicolor; fi
+	if [ -z "$(DESTDIR)" ] && command -v update-desktop-database >/dev/null; then update-desktop-database -q $(APPDIR); fi
+	if [ -z "$(DESTDIR)" ] && command -v gtk-update-icon-cache >/dev/null; then gtk-update-icon-cache -qtf $(PREFIX)/share/icons/hicolor; fi
 endef
 
 clean:

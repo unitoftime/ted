@@ -1,3 +1,4 @@
 target/
 bin/
-config/init.rhai
+packaging/arch/*
+!packaging/arch/PKGBUILD

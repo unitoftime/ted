@@ -37,6 +37,12 @@ make install    # install to ~/.local (binary, icon, desktop entry)
 
 For a system-wide install, run `sudo make install PREFIX=/usr/local`.
 
+On Arch Linux, build and install it as a package (tracks the latest commit; rerun to update):
+
+```sh
+cd packaging/arch && makepkg -si
+```
+
 ## Configuration
 
 ted reads `~/.config/ted/init.rhai` (or `$XDG_CONFIG_HOME/ted/init.rhai`) at startup.

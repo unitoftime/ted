@@ -1,0 +1,50 @@
+# Builds the latest pushed commit: `makepkg -si` in this directory, rerun to update.
+# The install layout lives in the Makefile; this only drives it.
+
+pkgname=ted-git
+pkgver=r46.310dca1
+pkgrel=1
+pkgdesc='Fast, extensible text editor in the spirit of Emacs'
+arch=('x86_64' 'aarch64')
+url='https://github.com/unitoftime/ted'
+license=('MIT')
+# The display libraries are loaded at runtime by whichever session is running.
+depends=('gcc-libs' 'glibc' 'hicolor-icon-theme' 'libxkbcommon')
+makedepends=('cargo' 'git')
+optdepends=(
+  'wayland: Wayland session'
+  'libx11: X11 session'
+  'libxcursor: X11 session'
+  'libxrandr: X11 session'
+  'libxi: X11 session'
+  'libxkbcommon-x11: X11 session'
+  'git: git porcelain'
+)
+provides=('ted')
+conflicts=('ted')
+source=("ted::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd ted
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd ted
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd ted
+  export RUSTUP_TOOLCHAIN=stable
+  make build CARGOFLAGS=--frozen
+}
+
+package() {
+  cd ted
+  export RUSTUP_TOOLCHAIN=stable
+  make install DESTDIR="$pkgdir" PREFIX=/usr CARGOFLAGS=--frozen
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
