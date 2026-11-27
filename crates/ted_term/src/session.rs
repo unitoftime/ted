@@ -123,6 +123,8 @@ pub struct Session {
     /// Whether the terminal is no longer this ted's to end: its program exited, or another
     /// ted attached it.
     pub ended: bool,
+    /// Where typing began on the line being edited (see `kills`).
+    pub input_start: Option<usize>,
 }
 
 /// Buffer-local slot holding a terminal buffer's session.
@@ -171,7 +173,7 @@ impl Session {
         let term = mirror.term.clone();
         connection.add(id, mirror);
         let handle = TermHandle { term, id, connection, size: Rc::new(Cell::new(INITIAL_SIZE)) };
-        Session { handle, job, ended: false }
+        Session { handle, job, ended: false, input_start: None }
     }
 
     pub fn write(&self, bytes: Vec<u8>) {

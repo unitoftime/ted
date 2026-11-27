@@ -6,7 +6,8 @@
 //!   editor's `C-x` commands (`C-x b`, `C-x o`, ...), `M-x` and whatever `init.rhai` binds
 //!   in the `terminal` keymap; `C-x` sequences the editor doesn't bind are passed on. The
 //!   screen is drawn straight from the emulator, so full-screen programs work. `C-]`
-//!   switches to view mode, `C-S-v` or `C-y` pastes, and the mouse wheel scrolls programs
+//!   switches to view mode, `C-S-v` or `C-y` pastes (see `kills`
+//!   for how the shell's `C-k`, `C-u`, `C-w` and `M-d` reach the kill ring), and the mouse wheel scrolls programs
 //!   that want it or else enters view mode. Dragging the mouse selects on the live screen
 //!   (a double-click selects lines); `M-w` or `C-S-c` copies the selection.
 //! - **View mode**: a frozen snapshot of scrollback + screen as a read-only buffer, where
@@ -27,6 +28,7 @@
 mod client;
 pub mod host;
 mod input;
+mod kills;
 mod palette;
 mod protocol;
 mod render;
@@ -187,14 +189,18 @@ fn send_key(ed: &mut Editor, arg: &Arg) {
     let id = ed.active_buffer_id();
     let Some(session) = session(ed, id) else { return };
     let Some(key) = arg.key() else { return };
-    let mode = {
+    let (mode, killed) = {
         let mut term = session.handle.term.lock();
         term.selection = None;
-        *term.mode()
+        let killed = kills::before_key(&term, &mut session.input_start, key);
+        (*term.mode(), killed)
     };
     if let Some(bytes) = input::encode(key, mode) {
         session.handle.scroll_to_bottom();
         session.write(bytes);
+    }
+    if let Some(text) = killed {
+        ed.kill_ring.push(text, KillMode::New);
     }
 }
 
@@ -206,6 +212,7 @@ fn paste(ed: &mut Editor) {
     let bracketed = {
         let mut term = session.handle.term.lock();
         term.selection = None;
+        kills::note_input(&term, &mut session.input_start);
         term.mode().contains(TermMode::BRACKETED_PASTE)
     };
     let bytes = if bracketed {

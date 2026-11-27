@@ -84,6 +84,33 @@ fn terminal_runs_commands_and_switches_to_view_mode() {
     wait_until(&mut ed, "C-x C-v forwarded", |ed| screen(ed).contains("GNU bash"));
     ed.handle_key(KeyEvent::ctrl('u'));
 
+    // The shell's kills at the prompt also go to the kill ring, for C-y anywhere. Text typed
+    // after moving the cursor shows when the shell has moved it.
+    let typed = |ed: &mut Editor, text: &str, shown: &str| {
+        for ch in text.chars() {
+            ed.handle_key(KeyEvent::plain_char(ch));
+        }
+        wait_until(ed, shown, |ed| screen(ed).contains(shown));
+    };
+    typed(&mut ed, "kill_me", "kill_me");
+    ed.handle_key(KeyEvent::ctrl('a'));
+    typed(&mut ed, "echo ", "echo kill_me");
+    ed.handle_key(KeyEvent::ctrl('k'));
+    assert_eq!(ed.kill_ring.current(), Some("kill_me"));
+    wait_until(&mut ed, "C-k done", |ed| !screen(ed).contains("kill_me"));
+    // C-u stops at the prompt
+    ed.handle_key(KeyEvent::ctrl('u'));
+    assert_eq!(ed.kill_ring.current(), Some("echo"));
+    typed(&mut ed, "echo one two", "$ echo one two");
+    ed.handle_key(KeyEvent::ctrl('w'));
+    assert_eq!(ed.kill_ring.current(), Some("two"));
+    ed.handle_key(KeyEvent::ctrl('a'));
+    typed(&mut ed, ":", "$ :echo one");
+    ed.handle_key(KeyEvent::alt('d'));
+    assert_eq!(ed.kill_ring.current(), Some("echo"));
+    ed.handle_key(KeyEvent::ctrl('e'));
+    ed.handle_key(KeyEvent::ctrl('u'));
+
     // C-] freezes it into an ordinary read-only buffer
     ed.handle_key(KeyEvent::ctrl(']'));
     assert_eq!(ed.active_buffer().mode().name, "Terminal View");
